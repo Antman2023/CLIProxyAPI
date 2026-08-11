@@ -1033,7 +1033,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) &&
+			!m.credentialPolicyAllowsExcludedModel(eligibility.credentialPolicy, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
