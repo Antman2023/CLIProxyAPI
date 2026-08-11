@@ -44,19 +44,25 @@ jobs:
 
           git fetch --force --tags
           previous_tag=""
+          changelog_args=()
           if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
             previous_tag="$previous_tag_value"
             changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
           else
             changelog_range="$GITHUB_REF_NAME"
+            changelog_args+=(--max-count=100)
           fi
 
-          git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
+          git log "${changelog_args[@]}" --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
             grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
 
-          gh api "repos/${GH_REPO}/releases/generate-notes" \
-            -f tag_name="$GITHUB_REF_NAME" \
-            --jq .body > "$generated_notes_file"
+          if [[ -n "$previous_tag" ]]; then
+            gh api "repos/${GH_REPO}/releases/generate-notes" \
+              -f tag_name="$GITHUB_REF_NAME" \
+              --jq .body > "$generated_notes_file"
+          else
+            printf 'Initial fork release.\n\n**Source**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$GITHUB_REF_NAME" > "$generated_notes_file"
+          fi
           if [[ ! -s "$generated_notes_file" ]]; then
             if [[ -n "$previous_tag" ]]; then
               printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
