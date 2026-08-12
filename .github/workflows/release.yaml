@@ -1,10 +1,15 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     # run only against tags
     tags:
       - 'v*-antman.*'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -17,12 +22,16 @@ env:
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release-tag.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.ref }}
       - name: Create release
+        id: release-tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -34,24 +43,51 @@ jobs:
           updated_notes_file="$(mktemp)"
           trap 'rm -f "$release_notes_file" "$generated_notes_file" "$changelog_entries_file" "$changelog_notes_file" "$updated_notes_file"' EXIT
 
-          if [[ "$GITHUB_REF_NAME" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)-antman\.([1-9][0-9]*)$ ]]; then
-            upstream_tag="${BASH_REMATCH[1]}"
-          else
-            echo "Release tag must use the format vX.Y.Z-antman.N" >&2
-            exit 1
-          fi
-
-          if ! gh api "repos/${UPSTREAM_REPO}/releases/tags/${upstream_tag}" --silent; then
-            echo "${upstream_tag} is not a release in ${UPSTREAM_REPO}" >&2
+          upstream_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          if [[ ! "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Latest upstream release has unsupported tag: ${upstream_tag}" >&2
             exit 1
           fi
 
           git fetch --force "https://github.com/${UPSTREAM_REPO}.git" \
             "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
-          if ! git merge-base --is-ancestor "${upstream_tag}^{commit}" "$GITHUB_SHA"; then
-            echo "${GITHUB_REF_NAME} must be based on upstream release ${upstream_tag}" >&2
+          if ! git merge-base --is-ancestor "${upstream_tag}^{commit}" HEAD; then
+            echo "Current commit must include latest upstream release ${upstream_tag}" >&2
             exit 1
           fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            git fetch --force --tags origin
+            latest_sequence="$(
+              while IFS= read -r existing_tag; do
+                sequence="${existing_tag#"${upstream_tag}-antman."}"
+                if [[ "$sequence" =~ ^[1-9][0-9]*$ ]]; then
+                  printf '%s\n' "$sequence"
+                fi
+              done < <(git tag --list "${upstream_tag}-antman.*")
+            )"
+            latest_sequence="$(
+              printf '%s\n' "$latest_sequence" |
+                sort -n |
+                tail -n 1
+            )"
+            next_sequence="$(( ${latest_sequence:-0} + 1 ))"
+            release_tag="${upstream_tag}-antman.${next_sequence}"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$release_tag" -m "Release ${release_tag}"
+            git push origin "refs/tags/${release_tag}"
+          elif [[ "$GITHUB_REF_NAME" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)-antman\.([1-9][0-9]*)$ ]]; then
+            release_tag="$GITHUB_REF_NAME"
+            if [[ "${BASH_REMATCH[1]}" != "$upstream_tag" ]]; then
+              echo "${release_tag} is based on ${BASH_REMATCH[1]}, but latest upstream release is ${upstream_tag}" >&2
+              exit 1
+            fi
+          else
+            echo "Release tag must use the format vX.Y.Z-antman.N" >&2
+            exit 1
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
 
           cat > "$release_notes_file" <<'EOF'
           <!-- cliproxyapi-linux-release-assets:start -->
@@ -62,19 +98,19 @@ jobs:
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
 
-          changelog_range="${upstream_tag}..${GITHUB_REF_NAME}"
+          changelog_range="${upstream_tag}..${release_tag}"
 
           git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
             grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
 
           if ! gh api "repos/${GH_REPO}/releases/generate-notes" \
-            -f tag_name="$GITHUB_REF_NAME" \
+            -f tag_name="$release_tag" \
             -f previous_tag_name="$upstream_tag" \
             --jq .body > "$generated_notes_file"; then
             : > "$generated_notes_file"
           fi
           if [[ ! -s "$generated_notes_file" ]]; then
-            printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$upstream_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
+            printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$upstream_tag" "$release_tag" > "$generated_notes_file"
           fi
 
           {
@@ -92,10 +128,10 @@ jobs:
             cat "$changelog_notes_file"
           } > "$updated_notes_file"
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" --title "$release_tag" --notes-file "$updated_notes_file"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release create "$release_tag" --title "$release_tag" --notes-file "$updated_notes_file"
           fi
 
   build-linux:
@@ -120,6 +156,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -132,9 +169,11 @@ jobs:
         run: git fetch --force --tags
       - name: Generate Build Metadata
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -194,6 +233,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -202,12 +242,13 @@ jobs:
             echo "No release archive found" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   publish-checksums:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - prepare-release
       - build-linux
     steps:
       - uses: actions/download-artifact@v7
@@ -217,6 +258,7 @@ jobs:
       - name: Publish final checksums
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           set -euo pipefail
           cd dist
@@ -227,4 +269,4 @@ jobs:
             exit 0
           fi
           sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-          gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber
+          gh release upload "$RELEASE_TAG" checksums.txt --clobber
