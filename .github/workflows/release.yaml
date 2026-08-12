@@ -4,13 +4,14 @@ on:
   push:
     # run only against tags
     tags:
-      - '*'
+      - 'v*-antman.*'
 
 permissions:
   contents: write
 
 env:
   GH_REPO: ${{ github.repository }}
+  UPSTREAM_REPO: router-for-me/CLIProxyAPI
   GO_VERSION: '1.26.4'
 
 jobs:
@@ -33,6 +34,25 @@ jobs:
           updated_notes_file="$(mktemp)"
           trap 'rm -f "$release_notes_file" "$generated_notes_file" "$changelog_entries_file" "$changelog_notes_file" "$updated_notes_file"' EXIT
 
+          if [[ "$GITHUB_REF_NAME" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)-antman\.([1-9][0-9]*)$ ]]; then
+            upstream_tag="${BASH_REMATCH[1]}"
+          else
+            echo "Release tag must use the format vX.Y.Z-antman.N" >&2
+            exit 1
+          fi
+
+          if ! gh api "repos/${UPSTREAM_REPO}/releases/tags/${upstream_tag}" --silent; then
+            echo "${upstream_tag} is not a release in ${UPSTREAM_REPO}" >&2
+            exit 1
+          fi
+
+          git fetch --force "https://github.com/${UPSTREAM_REPO}.git" \
+            "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
+          if ! git merge-base --is-ancestor "${upstream_tag}^{commit}" "$GITHUB_SHA"; then
+            echo "${GITHUB_REF_NAME} must be based on upstream release ${upstream_tag}" >&2
+            exit 1
+          fi
+
           cat > "$release_notes_file" <<'EOF'
           <!-- cliproxyapi-linux-release-assets:start -->
           ## Linux release assets
@@ -42,33 +62,19 @@ jobs:
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
 
-          git fetch --force --tags
-          previous_tag=""
-          changelog_args=()
-          if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
-            previous_tag="$previous_tag_value"
-            changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
-          else
-            changelog_range="$GITHUB_REF_NAME"
-            changelog_args+=(--max-count=100)
-          fi
+          changelog_range="${upstream_tag}..${GITHUB_REF_NAME}"
 
-          git log "${changelog_args[@]}" --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
+          git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
             grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
 
-          if [[ -n "$previous_tag" ]]; then
-            gh api "repos/${GH_REPO}/releases/generate-notes" \
-              -f tag_name="$GITHUB_REF_NAME" \
-              --jq .body > "$generated_notes_file"
-          else
-            printf 'Initial fork release.\n\n**Source**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$GITHUB_REF_NAME" > "$generated_notes_file"
+          if ! gh api "repos/${GH_REPO}/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            -f previous_tag_name="$upstream_tag" \
+            --jq .body > "$generated_notes_file"; then
+            : > "$generated_notes_file"
           fi
           if [[ ! -s "$generated_notes_file" ]]; then
-            if [[ -n "$previous_tag" ]]; then
-              printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
-            else
-              printf '**Full Changelog**: https://github.com/%s/commits/%s\n' "$GH_REPO" "$GITHUB_REF_NAME" > "$generated_notes_file"
-            fi
+            printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$upstream_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
           fi
 
           {
