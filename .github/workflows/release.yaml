@@ -1,10 +1,20 @@
 name: release
 
 on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream release tag to base this release on (defaults to latest)'
+        required: false
+        type: string
   push:
     # run only against tags
     tags:
       - 'v*-antman.*'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -17,14 +27,19 @@ env:
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release-tag.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.ref }}
       - name: Create release
+        id: release-tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         run: |
           set -euo pipefail
           release_notes_file="$(mktemp)"
@@ -34,16 +49,28 @@ jobs:
           updated_notes_file="$(mktemp)"
           trap 'rm -f "$release_notes_file" "$generated_notes_file" "$changelog_entries_file" "$changelog_notes_file" "$updated_notes_file"' EXIT
 
-          if [[ "$GITHUB_REF_NAME" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)-antman\.([1-9][0-9]*)$ ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            upstream_tag="$REQUESTED_UPSTREAM_TAG"
+            if [[ -z "$upstream_tag" ]]; then
+              upstream_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+            fi
+          elif [[ "$GITHUB_REF_NAME" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)-antman\.([1-9][0-9]*)$ ]]; then
             upstream_tag="${BASH_REMATCH[1]}"
+            release_tag="$GITHUB_REF_NAME"
           else
             echo "Release tag must use the format vX.Y.Z-antman.N" >&2
+            exit 1
+          fi
+
+          if [[ ! "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Upstream release tag must use the format vX.Y.Z: ${upstream_tag}" >&2
             exit 1
           fi
           if ! gh api "repos/${UPSTREAM_REPO}/releases/tags/${upstream_tag}" --silent; then
             echo "${upstream_tag} is not a release in ${UPSTREAM_REPO}" >&2
             exit 1
           fi
+
           git fetch --force "https://github.com/${UPSTREAM_REPO}.git" \
             "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
           if ! git merge-base --is-ancestor "${upstream_tag}^{commit}" HEAD; then
@@ -51,33 +78,52 @@ jobs:
             exit 1
           fi
 
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            git fetch --force --tags origin
+            latest_sequence="$(
+              while IFS= read -r existing_tag; do
+                sequence="${existing_tag#"${upstream_tag}-antman."}"
+                if [[ "$sequence" =~ ^[1-9][0-9]*$ ]]; then
+                  printf '%s\n' "$sequence"
+                fi
+              done < <(git tag --list "${upstream_tag}-antman.*")
+            )"
+            latest_sequence="$(
+              printf '%s\n' "$latest_sequence" |
+                sort -n |
+                tail -n 1
+            )"
+            next_sequence="$(( ${latest_sequence:-0} + 1 ))"
+            release_tag="${upstream_tag}-antman.${next_sequence}"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$release_tag" -m "Release ${release_tag}"
+            git push origin "refs/tags/${release_tag}"
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
           cat > "$release_notes_file" <<'EOF'
           <!-- cliproxyapi-linux-release-assets:start -->
           ## Linux release assets
 
-          - `CLIProxyAPI_<version>_linux_<arch>.tar.gz` is the default Linux build. It supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
-          - `CLIProxyAPI_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt. It does not support dynamic library plugins.
-
-          ## FreeBSD release assets
-
-          - `CLIProxyAPI_<version>_freebsd_aarch64_no-plugin.tar.gz` is the FreeBSD arm64 build. It is built without CGO and does not support dynamic library plugins.
+          - `CLIProxyAPI_<version>_linux_<arch>.tar.gz` supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
 
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
 
-          changelog_range="${upstream_tag}..${GITHUB_REF_NAME}"
+          changelog_range="${upstream_tag}..${release_tag}"
 
           git log --reverse --pretty=format:'- %s (%h)' "$changelog_range" |
             grep -Ev '^- (docs:|test:)' > "$changelog_entries_file" || true
 
           if ! gh api "repos/${GH_REPO}/releases/generate-notes" \
-            -f tag_name="$GITHUB_REF_NAME" \
+            -f tag_name="$release_tag" \
             -f previous_tag_name="$upstream_tag" \
             --jq .body > "$generated_notes_file"; then
             : > "$generated_notes_file"
           fi
           if [[ ! -s "$generated_notes_file" ]]; then
-            printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$upstream_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"
+            printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$upstream_tag" "$release_tag" > "$generated_notes_file"
           fi
 
           {
@@ -95,155 +141,14 @@ jobs:
             cat "$changelog_notes_file"
           } > "$updated_notes_file"
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" --title "$release_tag" --notes-file "$updated_notes_file"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release create "$release_tag" --title "$release_tag" --notes-file "$updated_notes_file"
           fi
 
-  build-hosted:
-    name: build ${{ matrix.target }}
-    needs: prepare-release
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: darwin-amd64
-            runner: macos-15-intel
-            goos: darwin
-            goarch: amd64
-            asset_arch: amd64
-            archive_format: tar.gz
-          - target: darwin-arm64
-            runner: macos-15
-            goos: darwin
-            goarch: arm64
-            asset_arch: aarch64
-            archive_format: tar.gz
-          - target: windows-amd64
-            runner: windows-latest
-            goos: windows
-            goarch: amd64
-            asset_arch: amd64
-            archive_format: zip
-          - target: windows-arm64
-            runner: windows-11-arm
-            goos: windows
-            goarch: arm64
-            asset_arch: aarch64
-            archive_format: zip
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Refresh models catalog
-        shell: bash
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Fetch tags
-        shell: bash
-        run: git fetch --force --tags
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: go-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
-            go-${{ runner.os }}-${{ runner.arch }}-
-      - name: Generate Build Metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: Build archive
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          ASSET_ARCH: ${{ matrix.asset_arch }}
-          ARCHIVE_FORMAT: ${{ matrix.archive_format }}
-        run: |
-          set -euo pipefail
-          binary_name="cli-proxy-api"
-          if [[ "$GOOS" == "windows" ]]; then
-            binary_name="cli-proxy-api.exe"
-          fi
-
-          archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_${GOOS}_${ASSET_ARCH}.${ARCHIVE_FORMAT}"
-          rm -rf "dist/${TARGET}"
-          mkdir -p "$archive_dir"
-
-          CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" go build \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "$archive_dir/$binary_name" ./cmd/server/
-
-          cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
-            powershell -NoProfile -Command "Compress-Archive -Path '${archive_dir}/*' -DestinationPath 'dist/${archive_name}' -Force"
-          else
-            tar -C "$archive_dir" -czf "dist/$archive_name" "$binary_name" LICENSE README.md README_CN.md config.example.yaml
-          fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
-          if-no-files-found: error
-      - name: Upload release assets
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip)
-          if [[ ${#assets[@]} -eq 0 ]]; then
-            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
-            printf '%s\n' "${assets[@]}" >&2
-            exit 1
-          fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-      - name: Refresh release checksums
-        continue-on-error: true
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
-            --dir "$tmp_dir" \
-            --clobber
-          (
-            cd "$tmp_dir"
-            shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
-            if [[ ${#archives[@]} -eq 0 ]]; then
-              echo "No release archives found"
-              exit 0
-            fi
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-            else
-              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
-            fi
-          )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
-
-  build-linux-glibc:
-    name: build linux-${{ matrix.goarch }} glibc
+  build-linux:
+    name: build linux-${{ matrix.goarch }}
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -264,6 +169,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ needs.prepare-release.outputs.release_tag }}
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -276,9 +182,11 @@ jobs:
         run: git fetch --force --tags
       - name: Generate Build Metadata
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Build archive
@@ -329,352 +237,49 @@ jobs:
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/CLIProxyAPI_*
           if-no-files-found: error
-      - name: Upload release assets
+      - name: Upload release asset
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           assets=(dist/CLIProxyAPI_*.tar.gz)
           if [[ ${#assets[@]} -eq 0 ]]; then
-            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
-            printf '%s\n' "${assets[@]}" >&2
+            echo "No release archive found" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-      - name: Refresh release checksums
-        continue-on-error: true
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
-            --dir "$tmp_dir" \
-            --clobber
-          (
-            cd "$tmp_dir"
-            shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
-            if [[ ${#archives[@]} -eq 0 ]]; then
-              echo "No release archives found"
-              exit 0
-            fi
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-            else
-              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
-            fi
-          )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
-
-  build-linux-no-plugin:
-    name: build linux-${{ matrix.goarch }} no-plugin
-    needs: prepare-release
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: linux-amd64-no-plugin
-            goarch: amd64
-            asset_arch: amd64
-          - target: linux-arm64-no-plugin
-            goarch: arm64
-            asset_arch: aarch64
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Refresh models catalog
-        shell: bash
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Fetch tags
-        shell: bash
-        run: git fetch --force --tags
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: go-linux-no-plugin-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-linux-no-plugin-${{ matrix.goarch }}-
-            go-linux-no-plugin-
-      - name: Generate Build Metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: Build archive
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          GOARCH: ${{ matrix.goarch }}
-          ASSET_ARCH: ${{ matrix.asset_arch }}
-        run: |
-          set -euo pipefail
-
-          archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_linux_${ASSET_ARCH}_no-plugin.tar.gz"
-          rm -rf "dist/${TARGET}"
-          mkdir -p "$archive_dir"
-
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "$archive_dir/cli-proxy-api" ./cmd/server/
-
-          if readelf -l "$archive_dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
-            readelf -l "$archive_dir/cli-proxy-api" >&2
-            echo "no-plugin linux binary must not require a dynamic interpreter" >&2
-            exit 1
-          fi
-
-          cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
-          if-no-files-found: error
-      - name: Upload release assets
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz)
-          if [[ ${#assets[@]} -eq 0 ]]; then
-            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
-            printf '%s\n' "${assets[@]}" >&2
-            exit 1
-          fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-      - name: Refresh release checksums
-        continue-on-error: true
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
-            --dir "$tmp_dir" \
-            --clobber
-          (
-            cd "$tmp_dir"
-            shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
-            if [[ ${#archives[@]} -eq 0 ]]; then
-              echo "No release archives found"
-              exit 0
-            fi
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-            else
-              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
-            fi
-          )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
-
-  build-freebsd:
-    name: build ${{ matrix.target }}
-    needs: prepare-release
-    runs-on: ubuntu-latest
-    env:
-      TARGET: ${{ matrix.target }}
-      TARGET_GOARCH: ${{ matrix.goarch }}
-      ASSET_ARCH: ${{ matrix.asset_arch }}
-      ASSET_SUFFIX: ${{ matrix.asset_suffix }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: freebsd-amd64
-            goarch: amd64
-            asset_arch: amd64
-            asset_suffix: ''
-            cgo_enabled: true
-          - target: freebsd-arm64-no-plugin
-            goarch: arm64
-            asset_arch: aarch64
-            asset_suffix: _no-plugin
-            cgo_enabled: false
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Fetch tags
-        run: git fetch --force --tags
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: go-freebsd-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            go-freebsd-${{ matrix.goarch }}-
-            go-freebsd-
-      - name: Generate Build Metadata
-        id: metadata
-        run: |
-          set -euo pipefail
-          release_version="${GITHUB_REF_NAME#v}"
-          commit="$(git rev-parse --short HEAD)"
-          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
-          echo "COMMIT=$commit" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$build_date" >> "$GITHUB_ENV"
-          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
-      - name: Prepare FreeBSD output
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "dist/${TARGET}"
-      - name: Install FreeBSD cross-build dependencies
-        if: ${{ matrix.cgo_enabled }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y clang lld wget
-      - name: Build FreeBSD binary with CGO
-        if: ${{ matrix.cgo_enabled }}
-        timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        with:
-          dir: .
-          packages: ./cmd/server/
-          targets: ${{ env.TARGET }}
-          out-dir: dist/${{ env.TARGET }}/bin
-          output: cli-proxy-api
-          flags: >-
-            -ldflags=-s -w
-            -X main.Version=${{ steps.metadata.outputs.release_version }}
-            -X main.Commit=${{ steps.metadata.outputs.commit }}
-            -X main.BuildDate=${{ steps.metadata.outputs.build_date }}
-      - name: Build FreeBSD no-plugin binary
-        if: ${{ !matrix.cgo_enabled }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "dist/${TARGET}/bin"
-          CGO_ENABLED=0 GOOS=freebsd GOARCH="$TARGET_GOARCH" go build -buildvcs=false \
-            -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
-      - name: Package FreeBSD archive
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_freebsd_${ASSET_ARCH}${ASSET_SUFFIX}.tar.gz"
-          mkdir -p "$archive_dir"
-
-          echo "Packaging ${archive_name}"
-          cp "dist/${TARGET}/bin/cli-proxy-api" "$archive_dir/cli-proxy-api"
-          cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
-          if-no-files-found: error
-      - name: Upload release assets
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz)
-          if [[ ${#assets[@]} -eq 0 ]]; then
-            printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
-            printf '%s\n' "${assets[@]}" >&2
-            exit 1
-          fi
-          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-      - name: Refresh release checksums
-        continue-on-error: true
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
-            --dir "$tmp_dir" \
-            --clobber
-          (
-            cd "$tmp_dir"
-            shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
-            if [[ ${#archives[@]} -eq 0 ]]; then
-              echo "No release archives found"
-              exit 0
-            fi
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-            else
-              shasum -a 256 "${archives[@]}" | sort -k2 > checksums.txt
-            fi
-          )
-          gh release upload "$GITHUB_REF_NAME" "$tmp_dir/checksums.txt" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
   publish-checksums:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - build-hosted
-      - build-linux-glibc
-      - build-linux-no-plugin
-      - build-freebsd
+      - prepare-release
+      - build-linux
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
       - name: Publish final checksums
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
         run: |
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+          archives=(CLIProxyAPI_*.tar.gz)
           if [[ ${#archives[@]} -eq 0 ]]; then
             echo "No release archives found"
             exit 0
           fi
           sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-          gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber
+          gh release upload "$RELEASE_TAG" checksums.txt --clobber
