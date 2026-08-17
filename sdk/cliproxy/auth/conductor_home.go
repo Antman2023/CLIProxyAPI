@@ -19,11 +19,16 @@ import (
 )
 
 const (
-	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
+	homeAuthCountMetadataKey             = "__cliproxy_home_auth_count"
+	homeDispatchModelOverrideMetadataKey = "__cliproxy_home_dispatch_model_override"
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
 	// Executors that do not support this marker may ignore it.
 	CloseAllExecutionSessionsID = "__all_execution_sessions__"
 )
+
+type homeDispatchModelOverride struct {
+	model string
+}
 
 // HomeDispatchBundle is the immutable client and registry pair for one Home lifetime.
 type HomeDispatchBundle struct {
@@ -739,6 +744,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if requestedModel == "" {
 		requestedModel = requestedModelFromMetadata(opts.Metadata, model)
 	}
+	dispatchModel := requestedModel
+	if override, ok := opts.Metadata[homeDispatchModelOverrideMetadataKey].(homeDispatchModelOverride); ok {
+		dispatchModel = strings.TrimSpace(override.model)
+	}
 	retained, retainedOK, errRetained := m.retainedHomeSessionSelection(ctx, opts, requestedModel)
 	if errRetained != nil {
 		return nil, errRetained
@@ -774,9 +783,9 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	var raw []byte
 	var errRPop error
 	if credentialPolicy == "" {
-		raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+		raw, errRPop = client.RPopAuth(ctx, dispatchModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
 	} else if policyClient, okPolicy := client.(homeCredentialPolicyDispatcher); okPolicy {
-		raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
+		raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, dispatchModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
 	} else {
 		pending.End()
 		return nil, &Error{Code: "home_unavailable", Message: "home dispatcher does not support credential policies", HTTPStatus: http.StatusServiceUnavailable}

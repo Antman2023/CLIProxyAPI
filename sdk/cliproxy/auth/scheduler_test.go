@@ -91,6 +91,13 @@ type authKindHomeDispatcher struct {
 	policies []string
 }
 
+type alphaExcludedHomeDispatcher struct {
+	auths    []Auth
+	models   []string
+	counts   []int
+	policies []string
+}
+
 func (d *authKindHomeDispatcher) HeartbeatOK() bool {
 	return true
 }
@@ -109,6 +116,26 @@ func (d *authKindHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model s
 }
 
 func (*authKindHomeDispatcher) AbortAmbiguousDispatch() {}
+
+func (d *alphaExcludedHomeDispatcher) HeartbeatOK() bool {
+	return true
+}
+
+func (d *alphaExcludedHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, count int) ([]byte, error) {
+	d.models = append(d.models, model)
+	d.counts = append(d.counts, count)
+	if model != "" || count < 1 || count > len(d.auths) {
+		return nil, home.ErrAuthNotFound
+	}
+	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
+}
+
+func (d *alphaExcludedHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, policy string) ([]byte, error) {
+	d.policies = append(d.policies, policy)
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
+}
+
+func (*alphaExcludedHomeDispatcher) AbortAmbiguousDispatch() {}
 
 func (s *inactivePluginScheduler) HasScheduler() bool {
 	return false
@@ -794,7 +821,7 @@ func TestManagerCodexAlphaSearchPolicyAllowsExcludedModel(t *testing.T) {
 	}
 	registerSchedulerModels(t, "codex", "gpt-5.5", credential.ID)
 
-	if selected, errSelect := manager.SelectAuth(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}); selected != nil || errSelect == nil {
+	if selected, errSelect := manager.SelectAuth(context.Background(), "codex", "gpt-5.4(high)", cliproxyexecutor.Options{}); selected != nil || errSelect == nil {
 		t.Fatalf("SelectAuth() = (%#v, %v), want excluded model rejection", selected, errSelect)
 	}
 
@@ -803,14 +830,14 @@ func TestManagerCodexAlphaSearchPolicyAllowsExcludedModel(t *testing.T) {
 		handled: true,
 	}
 	manager.SetPluginScheduler(pluginScheduler)
-	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "gpt-5.4", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "gpt-5.4(high)", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
 	if errSelect != nil {
 		t.Fatalf("SelectAuthWithCredentialPolicy() error = %v", errSelect)
 	}
 	if selected == nil || selected.ID != credential.ID {
 		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want %s", selected, credential.ID)
 	}
-	if len(pluginScheduler.requests) != 1 || pluginScheduler.requests[0].Model != "gpt-5.4" {
+	if len(pluginScheduler.requests) != 1 || pluginScheduler.requests[0].Model != "gpt-5.4(high)" {
 		t.Fatalf("plugin scheduler requests = %#v, want original model", pluginScheduler.requests)
 	}
 }
@@ -1113,6 +1140,57 @@ func TestSelectHomeAuthWithCredentialPolicyTransportsAndValidatesPolicy(t *testi
 	}
 	if got := dispatcher.policies; len(got) != 2 || got[0] != CredentialPolicyCodexAlphaSearchV1 || got[1] != CredentialPolicyCodexAlphaSearchV1 {
 		t.Fatalf("Home credential policies = %v", got)
+	}
+	selection.End("test_complete")
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+func TestSelectHomeAuthWithCredentialPolicyFallsBackForExcludedModel(t *testing.T) {
+	dispatcher := &alphaExcludedHomeDispatcher{auths: []Auth{
+		{
+			ID:       "wrong-prefix",
+			Provider: "codex",
+			Prefix:   "team-a",
+			Metadata: map[string]any{"access_token": "token-a"},
+			Attributes: map[string]string{
+				"excluded_models": "gpt-5.*",
+			},
+		},
+		{
+			ID:       "matching-prefix",
+			Provider: "codex",
+			Prefix:   "team-b",
+			Metadata: map[string]any{"access_token": "token-b"},
+			Attributes: map[string]string{
+				"excluded_models": "gpt-5.*",
+			},
+		},
+	}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+
+	selection, errSelect := manager.SelectHomeAuthWithCredentialPolicy(context.Background(), "codex", "team-b/gpt-5.4(high)", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selection == nil || selection.Auth == nil || selection.Auth.ID != "matching-prefix" {
+		t.Fatalf("SelectHomeAuthWithCredentialPolicy() = %#v, want matching-prefix", selection)
+	}
+	if got, want := dispatcher.models, []string{"team-b/gpt-5.4(high)", "", ""}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Home dispatch models = %v, want %v", got, want)
+	}
+	if got, want := dispatcher.counts, []int{1, 1, 2}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Home auth counts = %v, want %v", got, want)
+	}
+	for _, policy := range dispatcher.policies {
+		if policy != CredentialPolicyCodexAlphaSearchV1 {
+			t.Fatalf("Home credential policies = %v", dispatcher.policies)
+		}
 	}
 	selection.End("test_complete")
 	if errDrain := registry.Drain(context.Background()); errDrain != nil {

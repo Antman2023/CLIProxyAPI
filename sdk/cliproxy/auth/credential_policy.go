@@ -57,7 +57,7 @@ func (m *Manager) credentialPolicyAllowsExcludedModel(policy string, auth *Auth,
 		m.ResolveExecutionModel(auth, routeModel),
 	}
 	for _, model := range models {
-		model = strings.ToLower(strings.TrimSpace(model))
+		model = strings.ToLower(canonicalModelKey(model))
 		if model == "" {
 			continue
 		}
