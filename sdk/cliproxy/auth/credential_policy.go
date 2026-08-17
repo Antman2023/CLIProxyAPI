@@ -38,70 +38,18 @@ func credentialPolicyAllows(policy string, auth *Auth) bool {
 	}
 }
 
-// credentialPolicyAllowsExcludedModel reports whether a policy may use an auth
-// even though the requested route model was removed from its registered model
-// set by that auth's exclusion rules.
-func (m *Manager) credentialPolicyAllowsExcludedModel(policy string, auth *Auth, routeModel string) bool {
-	if policy != CredentialPolicyCodexAlphaSearchV1 || auth == nil || auth.Attributes == nil {
+// credentialPolicyAllowsModelIndependentSelection reports whether a policy may
+// select an auth without requiring the route model to be registered for it.
+// Explicit routing prefixes remain authoritative.
+func credentialPolicyAllowsModelIndependentSelection(policy string, auth *Auth, routeModel string) bool {
+	if policy != CredentialPolicyCodexAlphaSearchV1 || auth == nil {
 		return false
 	}
-	excludedModels := strings.TrimSpace(auth.Attributes["excluded_models"])
-	if excludedModels == "" {
-		return false
+	model := canonicalModelKey(routeModel)
+	slash := strings.IndexByte(model, '/')
+	if slash < 0 {
+		return true
 	}
-	excluded := strings.Split(excludedModels, ",")
-
-	models := []string{
-		rewriteModelForAuth(strings.TrimSpace(routeModel), auth),
-		m.selectionModelForAuth(auth, routeModel),
-		m.ResolveExecutionModel(auth, routeModel),
-	}
-	for _, model := range models {
-		model = strings.ToLower(canonicalModelKey(model))
-		if model == "" {
-			continue
-		}
-		for _, pattern := range excluded {
-			if matchExcludedModelPattern(strings.ToLower(strings.TrimSpace(pattern)), model) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// matchExcludedModelPattern matches the exclusion syntax used by model
-// registration, where '*' represents any substring.
-func matchExcludedModelPattern(pattern, model string) bool {
-	if pattern == "" {
-		return false
-	}
-	if !strings.Contains(pattern, "*") {
-		return pattern == model
-	}
-
-	parts := strings.Split(pattern, "*")
-	if prefix := parts[0]; prefix != "" {
-		if !strings.HasPrefix(model, prefix) {
-			return false
-		}
-		model = model[len(prefix):]
-	}
-	if suffix := parts[len(parts)-1]; suffix != "" {
-		if !strings.HasSuffix(model, suffix) {
-			return false
-		}
-		model = model[:len(model)-len(suffix)]
-	}
-	for _, segment := range parts[1 : len(parts)-1] {
-		if segment == "" {
-			continue
-		}
-		index := strings.Index(model, segment)
-		if index < 0 {
-			return false
-		}
-		model = model[index+len(segment):]
-	}
-	return true
+	prefix := strings.TrimSpace(auth.Prefix)
+	return prefix != "" && strings.EqualFold(strings.TrimSpace(model[:slash]), prefix)
 }

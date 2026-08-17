@@ -1034,7 +1034,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) &&
-			!m.credentialPolicyAllowsExcludedModel(eligibility.credentialPolicy, candidate, model) {
+			!credentialPolicyAllowsModelIndependentSelection(eligibility.credentialPolicy, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -1180,8 +1180,8 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(ctx context.Context, provid
 		}
 		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
 		policyMatches := credentialPolicyAllows(policy, selection.Auth)
-		excludedModelMatches := !excludedModelFallback || m.credentialPolicyAllowsExcludedModel(policy, selection.Auth, model)
-		if providerMatches && policyMatches && excludedModelMatches {
+		routeModelMatches := !excludedModelFallback || credentialPolicyAllowsModelIndependentSelection(policy, selection.Auth, model)
+		if providerMatches && policyMatches && routeModelMatches {
 			return selection, nil
 		}
 
@@ -1192,8 +1192,8 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(ctx context.Context, provid
 		reason := "credential_policy_mismatch"
 		if !providerMatches {
 			reason = "provider_mismatch"
-		} else if !excludedModelMatches {
-			reason = "excluded_model_mismatch"
+		} else if !routeModelMatches {
+			reason = "route_model_mismatch"
 		}
 		if errEnd := m.endHomeSelectionBeforeRedispatch(selectionCtx, selection, reason); errEnd != nil {
 			return nil, errEnd

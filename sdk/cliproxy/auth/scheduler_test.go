@@ -812,9 +812,6 @@ func TestManagerCodexAlphaSearchPolicyAllowsExcludedModel(t *testing.T) {
 		ID:       "codex-oauth-excluded-search-model",
 		Provider: "codex",
 		Metadata: map[string]any{"access_token": "token"},
-		Attributes: map[string]string{
-			"excluded_models": "gpt-5.4",
-		},
 	}
 	if _, errRegister := manager.Register(context.Background(), credential); errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
@@ -846,6 +843,11 @@ func TestManagerCodexAlphaSearchPolicyKeepsPrefixRoutingForExcludedModel(t *test
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["codex"] = schedulerTestExecutor{}
 	for _, credential := range []*Auth{
+		{
+			ID:       "codex-unprefixed-excluded-search-model",
+			Provider: "codex",
+			Metadata: map[string]any{"access_token": "token-unprefixed"},
+		},
 		{
 			ID:       "codex-team-a-excluded-search-model",
 			Provider: "codex",
@@ -1154,18 +1156,12 @@ func TestSelectHomeAuthWithCredentialPolicyFallsBackForExcludedModel(t *testing.
 			Provider: "codex",
 			Prefix:   "team-a",
 			Metadata: map[string]any{"access_token": "token-a"},
-			Attributes: map[string]string{
-				"excluded_models": "gpt-5.*",
-			},
 		},
 		{
 			ID:       "matching-prefix",
 			Provider: "codex",
 			Prefix:   "team-b",
 			Metadata: map[string]any{"access_token": "token-b"},
-			Attributes: map[string]string{
-				"excluded_models": "gpt-5.*",
-			},
 		},
 	}}
 	manager := NewManager(nil, nil, nil)
