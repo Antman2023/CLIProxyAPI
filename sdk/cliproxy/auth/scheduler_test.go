@@ -91,6 +91,13 @@ type authKindHomeDispatcher struct {
 	policies []string
 }
 
+type alphaSearchModelIndependentHomeDispatcher struct {
+	auths    []Auth
+	models   []string
+	counts   []int
+	policies []string
+}
+
 func (d *authKindHomeDispatcher) HeartbeatOK() bool {
 	return true
 }
@@ -109,6 +116,26 @@ func (d *authKindHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model s
 }
 
 func (*authKindHomeDispatcher) AbortAmbiguousDispatch() {}
+
+func (d *alphaSearchModelIndependentHomeDispatcher) HeartbeatOK() bool {
+	return true
+}
+
+func (d *alphaSearchModelIndependentHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, count int) ([]byte, error) {
+	d.models = append(d.models, model)
+	d.counts = append(d.counts, count)
+	if model != "" || count < 1 || count > len(d.auths) {
+		return nil, home.ErrAuthNotFound
+	}
+	return json.Marshal(homeAuthDispatchResponse{Auth: d.auths[count-1]})
+}
+
+func (d *alphaSearchModelIndependentHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, policy string) ([]byte, error) {
+	d.policies = append(d.policies, policy)
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
+}
+
+func (*alphaSearchModelIndependentHomeDispatcher) AbortAmbiguousDispatch() {}
 
 func (s *inactivePluginScheduler) HasScheduler() bool {
 	return false
@@ -778,6 +805,62 @@ func TestManagerCodexAlphaSearchPolicyRejectsOrdinaryAPIKey(t *testing.T) {
 	}
 }
 
+func TestManagerCodexAlphaSearchPolicyIgnoresModelRegistration(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	credential := &Auth{
+		ID:       "codex-oauth-model-independent-alpha-search",
+		Provider: "codex",
+		Metadata: map[string]any{"access_token": "token"},
+	}
+	if _, errRegister := manager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	registerSchedulerModels(t, "codex", "gpt-5.5", credential.ID)
+
+	if selected, errSelect := manager.SelectAuth(context.Background(), "codex", "gpt-5.4(high)", cliproxyexecutor.Options{}); selected != nil || errSelect == nil {
+		t.Fatalf("SelectAuth() = (%#v, %v), want model registration rejection", selected, errSelect)
+	}
+
+	pluginScheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: credential.ID},
+		handled: true,
+	}
+	manager.SetPluginScheduler(pluginScheduler)
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "gpt-5.4(high)", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != credential.ID {
+		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want %s", selected, credential.ID)
+	}
+	if len(pluginScheduler.requests) != 1 || pluginScheduler.requests[0].Model != "gpt-5.4(high)" {
+		t.Fatalf("plugin scheduler requests = %#v, want original model", pluginScheduler.requests)
+	}
+}
+
+func TestManagerCodexAlphaSearchPolicyKeepsPrefixRoutingWithoutModelRegistration(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, credential := range []*Auth{
+		{ID: "codex-unprefixed-alpha-search", Provider: "codex", Metadata: map[string]any{"access_token": "token-unprefixed"}},
+		{ID: "codex-team-a-alpha-search", Provider: "codex", Prefix: "team-a", Metadata: map[string]any{"access_token": "token-a"}},
+		{ID: "codex-team-b-alpha-search", Provider: "codex", Prefix: "team-b", Metadata: map[string]any{"access_token": "token-b"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), credential); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", credential.ID, errRegister)
+		}
+	}
+
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "team-b/gpt-5.4", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-team-b-alpha-search" {
+		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want codex-team-b-alpha-search", selected)
+	}
+}
+
 func TestManagerSelectAuthByKindWeightedRoundRobinIgnoresIneligibleAPIKeyWeight(t *testing.T) {
 	manager := NewManager(nil, &WeightedRoundRobinSelector{}, nil)
 	manager.executors["codex"] = schedulerTestExecutor{}
@@ -1039,6 +1122,41 @@ func TestSelectHomeAuthWithCredentialPolicyTransportsAndValidatesPolicy(t *testi
 	}
 	if got := dispatcher.policies; len(got) != 2 || got[0] != CredentialPolicyCodexAlphaSearchV1 || got[1] != CredentialPolicyCodexAlphaSearchV1 {
 		t.Fatalf("Home credential policies = %v", got)
+	}
+	selection.End("test_complete")
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+func TestSelectHomeAuthWithCredentialPolicyFallsBackWithoutModelRegistration(t *testing.T) {
+	dispatcher := &alphaSearchModelIndependentHomeDispatcher{auths: []Auth{
+		{ID: "wrong-prefix", Provider: "codex", Prefix: "team-a", Metadata: map[string]any{"access_token": "token-a"}},
+		{ID: "matching-prefix", Provider: "codex", Prefix: "team-b", Metadata: map[string]any{"access_token": "token-b"}},
+	}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+
+	selection, errSelect := manager.SelectHomeAuthWithCredentialPolicy(context.Background(), "codex", "team-b/gpt-5.4(high)", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selection == nil || selection.Auth == nil || selection.Auth.ID != "matching-prefix" {
+		t.Fatalf("SelectHomeAuthWithCredentialPolicy() = %#v, want matching-prefix", selection)
+	}
+	if got, want := dispatcher.models, []string{"team-b/gpt-5.4(high)", "", ""}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Home dispatch models = %v, want %v", got, want)
+	}
+	if got, want := dispatcher.counts, []int{1, 1, 2}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Home auth counts = %v, want %v", got, want)
+	}
+	for _, policy := range dispatcher.policies {
+		if policy != CredentialPolicyCodexAlphaSearchV1 {
+			t.Fatalf("Home credential policies = %v", dispatcher.policies)
+		}
 	}
 	selection.End("test_complete")
 	if errDrain := registry.Drain(context.Background()); errDrain != nil {

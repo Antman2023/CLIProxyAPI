@@ -1066,7 +1066,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) &&
+			!credentialPolicyAllowsModelIndependentSelection(eligibility.credentialPolicy, candidate, model) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -1191,17 +1192,29 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(ctx context.Context, provid
 		ctx = context.Background()
 	}
 	selectionCtx := withCredentialPolicy(ctx, policy)
-	homeAuthCount := homeAuthCountFromMetadata(opts.Metadata)
+	initialHomeAuthCount := homeAuthCountFromMetadata(opts.Metadata)
+	homeAuthCount := initialHomeAuthCount
+	modelIndependentFallback := false
 	tried := make(map[string]struct{})
 	for {
 		selectionOpts := withHomeAuthCount(opts, homeAuthCount)
+		if modelIndependentFallback {
+			selectionOpts = withHomeDispatchModelOverride(selectionOpts, "")
+		}
 		selection, errSelection := m.pickHomeDispatchSelection(selectionCtx, model, selectionOpts)
 		if errSelection != nil {
+			if !modelIndependentFallback && shouldRetryHomeCredentialPolicyWithoutModel(policy, model, errSelection) {
+				modelIndependentFallback = true
+				homeAuthCount = initialHomeAuthCount
+				clear(tried)
+				continue
+			}
 			return nil, errSelection
 		}
 		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
 		policyMatches := credentialPolicyAllows(policy, selection.Auth)
-		if providerMatches && policyMatches {
+		routeModelMatches := !modelIndependentFallback || credentialPolicyAllowsModelIndependentSelection(policy, selection.Auth, model)
+		if providerMatches && policyMatches && routeModelMatches {
 			return selection, nil
 		}
 
@@ -1212,6 +1225,8 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(ctx context.Context, provid
 		reason := "credential_policy_mismatch"
 		if !providerMatches {
 			reason = "provider_mismatch"
+		} else if !routeModelMatches {
+			reason = "route_model_mismatch"
 		}
 		if errEnd := m.endHomeSelectionBeforeRedispatch(selectionCtx, selection, reason); errEnd != nil {
 			return nil, errEnd
@@ -1225,6 +1240,24 @@ func (m *Manager) SelectHomeAuthWithCredentialPolicy(ctx context.Context, provid
 		tried[authID] = struct{}{}
 		homeAuthCount++
 	}
+}
+
+func withHomeDispatchModelOverride(opts cliproxyexecutor.Options, model string) cliproxyexecutor.Options {
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	meta[homeDispatchModelOverrideMetadataKey] = homeDispatchModelOverride{model: model}
+	opts.Metadata = meta
+	return opts
+}
+
+func shouldRetryHomeCredentialPolicyWithoutModel(policy, model string, err error) bool {
+	if policy != CredentialPolicyCodexAlphaSearchV1 || strings.TrimSpace(model) == "" || err == nil {
+		return false
+	}
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == "auth_not_found"
 }
 
 // SelectHomeAuthByKind selects a Home dispatch while retaining its execution scope.

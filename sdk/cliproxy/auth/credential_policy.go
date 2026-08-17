@@ -37,3 +37,19 @@ func credentialPolicyAllows(policy string, auth *Auth) bool {
 		return false
 	}
 }
+
+// credentialPolicyAllowsModelIndependentSelection reports whether a policy may
+// select an auth without requiring the route model to be registered for it.
+// Explicit routing prefixes remain authoritative.
+func credentialPolicyAllowsModelIndependentSelection(policy string, auth *Auth, routeModel string) bool {
+	if policy != CredentialPolicyCodexAlphaSearchV1 || auth == nil {
+		return false
+	}
+	model := canonicalModelKey(routeModel)
+	slash := strings.IndexByte(model, '/')
+	if slash < 0 {
+		return true
+	}
+	prefix := strings.TrimSpace(auth.Prefix)
+	return prefix != "" && strings.EqualFold(strings.TrimSpace(model[:slash]), prefix)
+}
