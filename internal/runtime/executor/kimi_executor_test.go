@@ -28,6 +28,41 @@ func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorRequestToFormatMatchesWireProtocol(t *testing.T) {
+	type requestToFormatReporter interface {
+		RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}
+
+	executor := NewKimiExecutor(&config.Config{})
+	reporter, ok := any(executor).(requestToFormatReporter)
+	if !ok {
+		t.Fatal("Kimi executor does not report its upstream request format")
+	}
+
+	tests := []struct {
+		name   string
+		stream bool
+		source sdktranslator.Format
+		want   sdktranslator.Format
+	}{
+		{name: "Claude non-streaming", source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "Claude streaming", stream: true, source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "OpenAI non-streaming", source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+		{name: "OpenAI streaming", stream: true, source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reporter.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+				SourceFormat: tt.source,
+				Stream:       tt.stream,
+			})
+			if got != tt.want {
+				t.Fatalf("RequestToFormat() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -263,10 +298,8 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 		t.Fatalf("upstream URL = %q, want Kimi messages endpoint", got)
 	}
 	upstreamBetas := upstreamRequest.Header.Get("Anthropic-Beta")
-	for _, beta := range []string{"client-beta-one", "client-beta-two", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"} {
-		if !strings.Contains(upstreamBetas, beta) {
-			t.Fatalf("Anthropic-Beta = %q, want %q", upstreamBetas, beta)
-		}
+	if upstreamBetas != "client-beta-one,client-beta-two" {
+		t.Fatalf("Anthropic-Beta = %q, want caller beta values only", upstreamBetas)
 	}
 
 	rawAPIRequest, existsRequest := ginCtx.Get("API_REQUEST")
