@@ -171,6 +171,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			prefix = trimmed
 		}
 	}
+	if provider == "codex" && prefix == "" {
+		prefix = "free"
+	}
 
 	disabled, _ := metadata["disabled"].(bool)
 	status := coreauth.StatusActive
