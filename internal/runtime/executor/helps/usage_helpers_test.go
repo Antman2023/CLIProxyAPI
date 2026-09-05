@@ -556,6 +556,16 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestUsageReporterSetTTFTNormalizesNonPositiveDuration(t *testing.T) {
+	for _, ttft := range []time.Duration{-time.Nanosecond, 0} {
+		reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+		reporter.setTTFT(ttft)
+		if got := reporter.ttftDuration(); got != time.Nanosecond {
+			t.Fatalf("ttftDuration() = %v, want %v", got, time.Nanosecond)
+		}
+	}
+}
+
 func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	delay := 40 * time.Millisecond
 	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())

@@ -508,6 +508,58 @@ func TestFileSynthesizer_Synthesize_PrefixValidation(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexDefaultPrefix(t *testing.T) {
+	tests := []struct {
+		name       string
+		authData   map[string]any
+		wantPrefix string
+	}{
+		{
+			name:       "missing prefix defaults to free",
+			authData:   map[string]any{"type": "codex"},
+			wantPrefix: "free",
+		},
+		{
+			name:       "blank prefix defaults to free",
+			authData:   map[string]any{"type": "codex", "prefix": "  "},
+			wantPrefix: "free",
+		},
+		{
+			name:       "custom prefix is preserved",
+			authData:   map[string]any{"type": "codex", "prefix": "paid"},
+			wantPrefix: "paid",
+		},
+		{
+			name:       "other providers remain unprefixed",
+			authData:   map[string]any{"type": "claude"},
+			wantPrefix: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, errMarshal := json.Marshal(tt.authData)
+			if errMarshal != nil {
+				t.Fatalf("failed to marshal auth data: %v", errMarshal)
+			}
+			auths, errSynthesize := SynthesizeAuthFile(&SynthesisContext{
+				Config:  &config.Config{},
+				AuthDir: t.TempDir(),
+				Now:     time.Now(),
+			}, "auth.json", data)
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("SynthesizeAuthFile() len = %d, want 1", len(auths))
+			}
+			if auths[0].Prefix != tt.wantPrefix {
+				t.Fatalf("prefix = %q, want %q", auths[0].Prefix, tt.wantPrefix)
+			}
+		})
+	}
+}
+
 func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	tests := []struct {
 		name     string
