@@ -38,6 +38,29 @@ func TestNormalizeOpenAIToolResultsTextOnly(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAIToolResultsTextOnlyClaudeInput(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"call_1","content":[
+            {"type":"text","text":"image inspected"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}
+        ]},
+        {"type":"text","text":"What color?"}
+    ]}]}`)
+
+	got := NormalizeOpenAIToolResultsTextOnly(input)
+
+	toolContent := gjson.GetBytes(got, "messages.0.content.0.content")
+	if toolContent.Type != gjson.String {
+		t.Fatalf("tool result content type = %s, want string", toolContent.Type)
+	}
+	if want := "image inspected\n\n" + openAIToolResultImageOmittedText; toolContent.String() != want {
+		t.Fatalf("tool result content = %q, want %q", toolContent.String(), want)
+	}
+	if gotText := gjson.GetBytes(got, "messages.0.content.1.text").String(); gotText != "What color?" {
+		t.Fatalf("user text = %q, want %q", gotText, "What color?")
+	}
+}
+
 func TestNormalizeOpenAIToolResultsTextOnlyImageAndUnknownContent(t *testing.T) {
 	tests := []struct {
 		name  string
