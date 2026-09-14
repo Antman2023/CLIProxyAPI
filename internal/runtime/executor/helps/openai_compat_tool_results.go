@@ -26,8 +26,8 @@ func ShouldNormalizeOpenAIToolResultsForModel(compat *config.OpenAICompatibility
 	return normalize
 }
 
-// NormalizeOpenAIToolResultsTextOnly converts OpenAI tool messages and Claude
-// tool_result blocks to text. Image parts are replaced with a short marker.
+// NormalizeOpenAIToolResultsTextOnly converts tool message content to strings.
+// Text parts are preserved and image parts are replaced with a short marker.
 func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
@@ -37,8 +37,7 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	out := payload
 	messageIndex := 0
 	messages.ForEach(func(_, message gjson.Result) bool {
-		switch message.Get("role").String() {
-		case "tool":
+		if message.Get("role").String() == "tool" {
 			content := message.Get("content")
 			if content.Exists() && content.Type != gjson.String {
 				path := fmt.Sprintf("messages.%d.content", messageIndex)
@@ -46,25 +45,6 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 					out = updated
 				}
 			}
-		case "user":
-			content := message.Get("content")
-			if !content.IsArray() {
-				break
-			}
-			contentIndex := 0
-			content.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "tool_result" {
-					toolContent := part.Get("content")
-					if toolContent.Exists() && toolContent.Type != gjson.String {
-						path := fmt.Sprintf("messages.%d.content.%d.content", messageIndex, contentIndex)
-						if updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(toolContent)); errSet == nil {
-							out = updated
-						}
-					}
-				}
-				contentIndex++
-				return true
-			})
 		}
 		messageIndex++
 		return true
