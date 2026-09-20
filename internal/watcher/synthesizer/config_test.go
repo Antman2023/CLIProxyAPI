@@ -352,6 +352,34 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_CodexKeyKeepsWebsocketsOptIn(t *testing.T) {
+	t.Parallel()
+
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{CodexKey: []config.CodexKey{{
+			APIKey:  "codex-key-123",
+			BaseURL: "https://example.com",
+		}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if got := auths[0].Attributes["websockets"]; got != "false" {
+		t.Fatalf("websockets = %q, want false", got)
+	}
+	if coreauth.WebsocketsEnabled(auths[0]) {
+		t.Fatal("configured Codex API key unexpectedly enabled websockets")
+	}
+}
+
 func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

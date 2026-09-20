@@ -86,8 +86,7 @@ func TestListAuthFiles_IncludesWebsocketsFromManager(t *testing.T) {
 		Provider: "codex",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
-			"path":       filePath,
-			"websockets": "true",
+			"path": filePath,
 		},
 		Metadata: map[string]any{
 			"type": "codex",
@@ -120,6 +119,23 @@ func TestListAuthFilesFromDisk_IncludesWebsockets(t *testing.T) {
 	entry := firstAuthFileEntry(t, h)
 	if got := entry["websockets"]; got != false {
 		t.Fatalf("expected websockets false, got %#v", got)
+	}
+}
+
+func TestListAuthFilesFromDisk_DefaultsCodexWebsocketsToTrue(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "codex-user@example.com-pro.json")
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+
+	entry := firstAuthFileEntry(t, h)
+	if got := entry["websockets"]; got != true {
+		t.Fatalf("expected default websockets true, got %#v", got)
 	}
 }
 

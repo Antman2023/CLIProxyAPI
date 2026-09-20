@@ -252,7 +252,11 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		if baseURL != "" {
 			attrs["base_url"] = baseURL
 		}
-		if entry.Websockets {
+		if provider == "codex" {
+			// Codex OAuth credentials default to websockets, while configured API
+			// keys retain their explicit opt-in behavior for custom upstreams.
+			attrs["websockets"] = strconv.FormatBool(entry.Websockets)
+		} else if entry.Websockets {
 			attrs["websockets"] = "true"
 		}
 		if provider == "codex" && entry.AlphaSearch {

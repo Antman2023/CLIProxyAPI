@@ -592,18 +592,13 @@ func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
 	if auth == nil {
 		return false, false
 	}
-	if auth.Attributes != nil {
-		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed, true
-			}
-		}
+	if value, configured := coreauth.WebsocketsSetting(auth); configured {
+		return value, true
 	}
-	if auth.Metadata == nil {
-		return false, false
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return true, true
 	}
-	return parseWebsocketsValue(auth.Metadata["websockets"])
+	return false, false
 }
 
 func parsePriorityValue(raw any) (int, bool) {
