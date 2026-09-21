@@ -240,8 +240,88 @@ func (s *authScheduler) setSelector(selector Selector) {
 	}
 }
 
+// isSchedulableAuth determines whether an auth can be scheduled by a provider scheduler,
+// returning its normalized ID and providerKey.
+func isSchedulableAuth(auth *Auth) (string, string, bool) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return "", "", false
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return "", "", false
+	}
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return "", "", false
+	}
+	return authID, providerKey, true
+}
+
+// needsSyncFromMap reports whether the scheduler state is missing auths or has outdated metadata/epochs,
+// reading directly from an in-memory auth map without cloning auth instances.
+func (s *authScheduler) needsSyncFromMap(auths map[string]*Auth) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.needsSyncFromMapLocked(auths)
+}
+
+func (s *authScheduler) needsSyncFromMapLocked(auths map[string]*Auth) bool {
+	activeCount := 0
+	for _, auth := range auths {
+		if _, _, ok := isSchedulableAuth(auth); ok {
+			activeCount++
+		}
+	}
+	if activeCount != len(s.authProviders) {
+		return true
+	}
+
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		authID, providerKey, schedulable := isSchedulableAuth(auth)
+		if !schedulable {
+			rawID := strings.TrimSpace(auth.ID)
+			if rawID != "" {
+				if _, exists := s.authProviders[rawID]; exists {
+					return true
+				}
+			}
+			continue
+		}
+
+		if s.authProviders[authID] != providerKey {
+			return true
+		}
+
+		pState := s.providers[providerKey]
+		if pState == nil {
+			return true
+		}
+		meta := pState.auths[authID]
+		if meta == nil {
+			return true
+		}
+
+		genMeta, okGen := s.authGenerations[authID]
+		if !okGen || genMeta.epoch != auth.RegistrationEpoch {
+			return true
+		}
+
+		currentRegEpoch := registry.GetGlobalRegistry().ClientRegistrationEpoch(authID)
+		if meta.registryEpoch != currentRegEpoch {
+			return true
+		}
+	}
+	return false
+}
+
 // rebuild recreates scheduler entries from an auth snapshot while retaining
-// in-memory rotation state for provider/model shards that still exist.
+// in-memory runtime and rotation state for auths and provider/model shards that still exist.
 func (s *authScheduler) rebuild(auths []*Auth) {
 	if s == nil {
 		return
@@ -251,6 +331,21 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	providerCursorStates := snapshotProviderCursors(s.providers)
 	mixedCursors := s.mixedCursors
 	mixedWeightedStates := s.mixedWeightedStates
+
+	// Capture existing auth metadata so that in-flight MarkResult updates (which advanced
+	// Generation and updated cooldown/quota states) are preserved during rebuild.
+	existingMetas := make(map[string]*scheduledAuthMeta)
+	for _, pState := range s.providers {
+		if pState == nil {
+			continue
+		}
+		for id, meta := range pState.auths {
+			if meta != nil && meta.auth != nil {
+				existingMetas[id] = meta
+			}
+		}
+	}
+
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
 	if s.authGenerations == nil {
@@ -266,7 +361,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	}
 	now := time.Now()
 	for _, auth := range auths {
-		s.upsertAuthLocked(auth, now)
+		s.upsertAuthRebuildLocked(auth, existingMetas, now)
 	}
 	for providerKey, modelStates := range providerCursorStates {
 		providerState := s.providers[providerKey]
@@ -388,7 +483,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	providerKey := canonicalSchedulingProvider(provider)
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -716,7 +811,7 @@ func normalizeProviderKeys(providers []string) []string {
 	seen := make(map[string]struct{}, len(providers))
 	out := make([]string, 0, len(providers))
 	for _, provider := range providers {
-		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		providerKey := canonicalSchedulingProvider(provider)
 		if providerKey == "" {
 			continue
 		}
@@ -762,6 +857,72 @@ func (s *authScheduler) isStaleScheduledAuth(authID string, incomingEpoch, incom
 // upsertAuthLocked updates one auth in-place while the scheduler mutex is held.
 func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 	s.upsertAuthLifecycleLocked(auth, now)
+}
+
+// upsertAuthRebuildLocked inserts an auth during a scheduler rebuild.
+// It respects removal tombstones (existing.epoch > incomingEpoch), but does not drop
+// an active credential simply because an in-flight MarkResult advanced its Generation.
+// When existing scheduler state contains a newer Generation than the rebuild snapshot,
+// the newer auth state (including updated cooldown/quota/error states) is preserved.
+func (s *authScheduler) upsertAuthRebuildLocked(auth *Auth, existingMetas map[string]*scheduledAuthMeta, now time.Time) {
+	if auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+
+	if s.authGenerations == nil {
+		s.authGenerations = make(map[string]scheduledGenerationMeta)
+	}
+	if existing, ok := s.authGenerations[authID]; ok && existing.epoch > auth.RegistrationEpoch {
+		return
+	}
+
+	authToSchedule := auth
+	if existing, ok := s.authGenerations[authID]; ok && existing.epoch == auth.RegistrationEpoch && existing.generation > auth.Generation {
+		existingMeta := existingMetas[authID]
+		if existingMeta == nil || existingMeta.auth == nil || existingMeta.auth.Disabled || existingMeta.auth.Status == StatusDisabled {
+			// Newer state disabled or removed the auth from providers; do not resurrect with old enabled snapshot.
+			return
+		}
+		authToSchedule = existingMeta.auth
+	}
+
+	providerKey := executorKeyFromAuth(authToSchedule)
+	if providerKey == "" || authToSchedule.Disabled || authToSchedule.Status == StatusDisabled {
+		s.removeAuthFromProvidersLocked(authID)
+		return
+	}
+
+	effectiveGeneration := authToSchedule.Generation
+	effectiveUpdatedAt := authToSchedule.UpdatedAt
+	if existing, ok := s.authGenerations[authID]; ok && existing.epoch == authToSchedule.RegistrationEpoch {
+		if existing.generation > effectiveGeneration {
+			effectiveGeneration = existing.generation
+			if existing.updatedAt.After(effectiveUpdatedAt) {
+				effectiveUpdatedAt = existing.updatedAt
+			}
+		}
+	}
+	s.authGenerations[authID] = scheduledGenerationMeta{
+		epoch:      authToSchedule.RegistrationEpoch,
+		generation: effectiveGeneration,
+		updatedAt:  effectiveUpdatedAt,
+	}
+
+	if previousProvider := s.authProviders[authID]; previousProvider != "" && previousProvider != providerKey {
+		if previousState := s.providers[previousProvider]; previousState != nil {
+			previousState.removeAuthLocked(authID)
+		}
+	}
+
+	providerState := s.ensureProviderLocked(providerKey)
+	regEpoch := registry.GetGlobalRegistry().ClientRegistrationEpoch(authID)
+	meta := buildScheduledAuthMetaWithModelSet(authToSchedule, supportedModelSetForAuth(authToSchedule.ID), regEpoch)
+	s.authProviders[authID] = providerKey
+	providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 }
 
 // upsertAuthLifecycleLocked updates one auth in-place during lifecycle events (Register/Update/Rebuild),
