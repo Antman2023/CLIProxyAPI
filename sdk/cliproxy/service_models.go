@@ -656,6 +656,7 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		}
 		clone := cloneModelInfoForCatalogRoute(model)
 		clone.ID = trimmedPrefix + "/" + baseID
+		clone.CredentialPrefixed = true
 		if clone.MetadataModelID == "" {
 			clone.MetadataModelID = baseID
 		}

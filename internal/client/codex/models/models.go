@@ -95,6 +95,9 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		if id == "" {
 			continue
 		}
+		if info := registry.LookupModelInfo(id); info != nil && info.CredentialPrefixed {
+			continue
+		}
 
 		metadataID := codexClientMetadataModelID(id)
 
