@@ -922,11 +922,9 @@ func (d *codex426RetryDispatcher) RPopAuth(_ context.Context, model string, _ st
 	}
 	credentialID := "codex-home-" + strconv.Itoa(call)
 	attributes := map[string]string{
-		"api_key":  "home-key",
-		"base_url": d.baseURLs[call-1],
-	}
-	if call <= len(d.websockets) && d.websockets[call-1] {
-		attributes["websockets"] = "true"
+		"api_key":    "home-key",
+		"base_url":   d.baseURLs[call-1],
+		"websockets": strconv.FormatBool(call <= len(d.websockets) && d.websockets[call-1]),
 	}
 	return json.Marshal(map[string]any{
 		"model":      model,

@@ -467,6 +467,8 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 						fileData["websockets"] = parsed
 					}
 				}
+			} else if strings.EqualFold(strings.TrimSpace(typeValue), "codex") {
+				fileData["websockets"] = true
 			}
 			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
 				fileData["request_retry"] = requestRetry
@@ -858,29 +860,11 @@ func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
 	if auth == nil {
 		return false, false
 	}
-	if auth.Attributes != nil {
-		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
-			parsed, errParse := strconv.ParseBool(raw)
-			if errParse == nil {
-				return parsed, true
-			}
-		}
+	if value, configured := coreauth.WebsocketsSetting(auth); configured {
+		return value, true
 	}
-	if auth.Metadata == nil {
-		return false, false
-	}
-	raw, ok := auth.Metadata["websockets"]
-	if !ok || raw == nil {
-		return false, false
-	}
-	switch v := raw.(type) {
-	case bool:
-		return v, true
-	case string:
-		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-		if errParse == nil {
-			return parsed, true
-		}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return true, true
 	}
 	return false, false
 }

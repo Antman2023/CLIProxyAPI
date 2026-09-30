@@ -484,11 +484,11 @@ func (r *UsageReporter) ObserveTokenEvent(isToken bool) {
 		return
 	}
 	if !r.firstPacketSet {
-		r.firstPacketDuration = time.Since(start)
+		r.firstPacketDuration = normalizeTTFTDuration(time.Since(start))
 		r.firstPacketSet = true
 	}
 	if isToken {
-		r.ttft = time.Since(start)
+		r.ttft = normalizeTTFTDuration(time.Since(start))
 		r.ttftSet = true
 		r.ttftStart = time.Time{}
 	}
@@ -702,9 +702,7 @@ func (r *UsageReporter) setTTFT(ttft time.Duration) {
 	if r == nil {
 		return
 	}
-	if ttft < 0 {
-		ttft = 0
-	}
+	ttft = normalizeTTFTDuration(ttft)
 	r.ttftMu.Lock()
 	if r.ttftSet {
 		r.ttftMu.Unlock()
@@ -714,6 +712,13 @@ func (r *UsageReporter) setTTFT(ttft time.Duration) {
 	r.ttftSet = true
 	r.ttftStart = time.Time{}
 	r.ttftMu.Unlock()
+}
+
+func normalizeTTFTDuration(ttft time.Duration) time.Duration {
+	if ttft <= 0 {
+		return time.Nanosecond
+	}
+	return ttft
 }
 
 func (r *UsageReporter) ttftDuration() time.Duration {

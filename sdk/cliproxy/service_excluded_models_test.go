@@ -360,13 +360,13 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		t.Fatal("expected gemini-pro-agent to be registered")
 	}
 	if !agentModel.SupportsWebSearch {
-		t.Fatal("gemini-pro-agent should support web search")
+		t.Fatal("expected gemini-pro-agent to preserve static web search support")
 	}
 	if staticOnlyModel == nil {
 		t.Fatal("expected static-only Antigravity model to remain registered")
 	}
 	if staticOnlyModel.SupportsWebSearch {
-		t.Fatal("gpt-oss-120b-medium should not support web search")
+		t.Fatal("gpt-oss-120b-medium should not gain web search support from fetched capabilities")
 	}
 	if fetchedOnlyModel != nil {
 		t.Fatalf("fetched-only model should not be registered: %#v", fetchedOnlyModel)
