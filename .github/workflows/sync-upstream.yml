@@ -1,4 +1,4 @@
-name: Sync upstream and release
+name: Sync upstream release and publish
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: sync-upstream
+  group: sync-upstream-release
   cancel-in-progress: false
 
 permissions:
@@ -18,7 +18,7 @@ env:
   TARGET_BRANCH: main
 
 jobs:
-  sync:
+  sync-release:
     runs-on: ubuntu-latest
     steps:
       - name: Check out fork
@@ -33,73 +33,92 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch upstream
+      - name: Configure upstream
         run: |
           set -euo pipefail
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null ||             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch --prune upstream "${TARGET_BRANCH}"
-          git fetch --force --tags upstream
+          git fetch --force --tags origin
 
-      - name: Merge upstream
-        id: sync
-        run: |
-          set -euo pipefail
-
-          before="$(git rev-parse HEAD)"
-          upstream_head="$(git rev-parse "upstream/${TARGET_BRANCH}")"
-
-          echo "before=${before}"
-          echo "upstream_head=${upstream_head}"
-
-          if git merge-base --is-ancestor "${upstream_head}" HEAD; then
-            echo "changed=false" >> "${GITHUB_OUTPUT}"
-            echo "Fork already contains upstream/${TARGET_BRANCH}."
-            exit 0
-          fi
-
-          if ! git merge --no-edit "upstream/${TARGET_BRANCH}"; then
-            echo "::error::Upstream merge has conflicts. No changes were pushed."
-            git merge --abort || true
-            exit 1
-          fi
-
-          after="$(git rev-parse HEAD)"
-          echo "after=${after}"
-          echo "changed=true" >> "${GITHUB_OUTPUT}"
-          echo "merge_sha=${after}" >> "${GITHUB_OUTPUT}"
-
-          git push origin "HEAD:${TARGET_BRANCH}"
-
-      - name: Find latest upstream release
-        id: upstream_release
-        if: steps.sync.outputs.changed == 'true'
+      - name: Detect new official upstream release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          upstream_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/latest")"
+          upstream_tag="$(jq -r '.tag_name' <<<"${release_json}")"
+          prerelease="$(jq -r '.prerelease' <<<"${release_json}")"
+          draft="$(jq -r '.draft' <<<"${release_json}")"
+
+          if [[ "${draft}" != "false" || "${prerelease}" != "false" ]]; then
+            echo "new_release=false" >> "${GITHUB_OUTPUT}"
+            echo "Latest upstream release is not a final release; skipping."
+            exit 0
+          fi
 
           if [[ ! "${upstream_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Unexpected upstream release tag: ${upstream_tag}"
             exit 1
           fi
 
-          git fetch --force upstream "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}"
+          if git tag --list "${upstream_tag}-antman.*" | grep -q .; then
+            echo "new_release=false" >> "${GITHUB_OUTPUT}"
+            echo "tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+            echo "Already published an Antman release for ${upstream_tag}; nothing to do."
+            exit 0
+          fi
 
-          if ! git merge-base --is-ancestor "${upstream_tag}^{commit}" HEAD; then
-            echo "::error::Merged main does not contain latest upstream release ${upstream_tag}."
+          echo "new_release=true" >> "${GITHUB_OUTPUT}"
+          echo "tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "New official upstream release detected: ${upstream_tag}"
+
+      - name: Fetch upstream release tag
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force upstream             "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+
+      - name: Merge released upstream commit
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          release_commit="$(git rev-parse "${UPSTREAM_TAG}^{commit}")"
+
+          if git merge-base --is-ancestor "${release_commit}" HEAD; then
+            echo "Current main already contains ${UPSTREAM_TAG}; no merge needed."
+            exit 0
+          fi
+
+          if ! git merge --no-edit "${release_commit}"; then
+            echo "::error::Merge conflict while syncing official upstream release ${UPSTREAM_TAG}. No changes were pushed."
+            git merge --abort || true
             exit 1
           fi
 
-          echo "tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
-          echo "Using upstream release ${upstream_tag}"
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Verify release commit is included
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "${UPSTREAM_TAG}^{commit}" HEAD; then
+            echo "::error::Current main does not contain ${UPSTREAM_TAG}."
+            exit 1
+          fi
 
       - name: Dispatch release workflow
-        if: steps.sync.outputs.changed == 'true'
+        if: steps.release.outputs.new_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          UPSTREAM_TAG: ${{ steps.upstream_release.outputs.tag }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           gh workflow run release.yaml             --repo "${GITHUB_REPOSITORY}"             --ref "${TARGET_BRANCH}"             -f "upstream_tag=${UPSTREAM_TAG}"
