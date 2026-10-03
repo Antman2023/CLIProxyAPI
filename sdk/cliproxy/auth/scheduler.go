@@ -113,10 +113,6 @@ type readyBucketCursorState struct {
 	ws  readyViewCursorState
 }
 
-type modelSchedulerCursorState map[int]readyBucketCursorState
-
-type providerSchedulerCursorState map[string]modelSchedulerCursorState
-
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
 	state := readyViewCursorState{lastPicked: view.lastPicked}
 	if len(view.weightedState.current) > 0 {
@@ -155,34 +151,6 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 	view.weightedState.weights = weights
 }
 
-func snapshotProviderCursors(providers map[string]*providerScheduler) map[string]providerSchedulerCursorState {
-	states := make(map[string]providerSchedulerCursorState, len(providers))
-	for providerKey, providerState := range providers {
-		if providerState == nil || len(providerState.modelShards) == 0 {
-			continue
-		}
-		modelStates := make(providerSchedulerCursorState, len(providerState.modelShards))
-		for modelKey, shard := range providerState.modelShards {
-			if shard == nil {
-				continue
-			}
-			bucketStates := make(modelSchedulerCursorState, len(shard.readyByPriority))
-			for priority, bucket := range shard.readyByPriority {
-				if bucket == nil {
-					continue
-				}
-				bucketStates[priority] = readyBucketCursorState{
-					all: snapshotReadyViewCursors(bucket.all),
-					ws:  snapshotReadyViewCursors(bucket.ws),
-				}
-			}
-			modelStates[modelKey] = bucketStates
-		}
-		states[providerKey] = modelStates
-	}
-	return states
-}
-
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
@@ -209,7 +177,7 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	}
 }
 
-// setSelector updates the active built-in strategy and resets rotation state.
+// setSelector updates the active built-in strategy and resets mixed-provider cursors.
 func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
 		return
@@ -219,25 +187,6 @@ func (s *authScheduler) setSelector(selector Selector) {
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
 	clear(s.mixedWeightedStates)
-	for _, providerState := range s.providers {
-		if providerState == nil {
-			continue
-		}
-		for _, shard := range providerState.modelShards {
-			if shard == nil {
-				continue
-			}
-			for _, bucket := range shard.readyByPriority {
-				if bucket == nil {
-					continue
-				}
-				bucket.all.lastPicked = ""
-				bucket.all.weightedState = smoothWeightedState{}
-				bucket.ws.lastPicked = ""
-				bucket.ws.weightedState = smoothWeightedState{}
-			}
-		}
-	}
 }
 
 // isSchedulableAuth determines whether an auth can be scheduled by a provider scheduler,
@@ -320,17 +269,13 @@ func (s *authScheduler) needsSyncFromMapLocked(auths map[string]*Auth) bool {
 	return false
 }
 
-// rebuild recreates scheduler entries from an auth snapshot while retaining
-// in-memory runtime and rotation state for auths and provider/model shards that still exist.
+// rebuild recreates the complete scheduler state from an auth snapshot.
 func (s *authScheduler) rebuild(auths []*Auth) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	providerCursorStates := snapshotProviderCursors(s.providers)
-	mixedCursors := s.mixedCursors
-	mixedWeightedStates := s.mixedWeightedStates
 
 	// Capture existing auth metadata so that in-flight MarkResult updates (which advanced
 	// Generation and updated cooldown/quota states) are preserved during rebuild.
@@ -351,37 +296,11 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	if s.authGenerations == nil {
 		s.authGenerations = make(map[string]scheduledGenerationMeta)
 	}
-	s.mixedCursors = mixedCursors
-	if s.mixedCursors == nil {
-		s.mixedCursors = make(map[string]int)
-	}
-	s.mixedWeightedStates = mixedWeightedStates
-	if s.mixedWeightedStates == nil {
-		s.mixedWeightedStates = make(map[string]*smoothWeightedState)
-	}
+	s.mixedCursors = make(map[string]int)
+	s.mixedWeightedStates = make(map[string]*smoothWeightedState)
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthRebuildLocked(auth, existingMetas, now)
-	}
-	for providerKey, modelStates := range providerCursorStates {
-		providerState := s.providers[providerKey]
-		if providerState == nil {
-			continue
-		}
-		for modelKey, bucketStates := range modelStates {
-			shard := providerState.ensureModelLocked(modelKey, now)
-			if shard == nil {
-				continue
-			}
-			for priority, bucketState := range bucketStates {
-				bucket := shard.readyByPriority[priority]
-				if bucket == nil {
-					continue
-				}
-				restoreReadyViewCursors(&bucket.all, bucketState.all)
-				restoreReadyViewCursors(&bucket.ws, bucketState.ws)
-			}
-		}
 	}
 }
 
