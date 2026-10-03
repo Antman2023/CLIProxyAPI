@@ -434,6 +434,7 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
+	freePrefix := strings.TrimSpace(a.Prefix) == "free"
 	normalizedModels := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model == nil {
@@ -442,6 +443,12 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		modelID := strings.TrimSpace(model.ID)
 		if modelID == "" {
 			continue
+		}
+		if freePrefix {
+			baseID := strings.TrimPrefix(modelID, "free/")
+			if baseID != "codex-auto-review" && !strings.HasSuffix(baseID, "-luna") {
+				continue
+			}
 		}
 		clone := *model
 		clone.ID = modelID

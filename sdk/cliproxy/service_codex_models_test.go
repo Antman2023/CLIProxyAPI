@@ -11,6 +11,96 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func TestRegisterModelsForAuthFreePrefix(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		prefix      string
+		forcePrefix bool
+		wantIDs     []string
+	}{
+		{
+			name: "free keeps allowed models and unprefixed routes", prefix: "free",
+			wantIDs: []string{"gpt-6-luna", "future-luna", "codex-auto-review", "free/gpt-6-luna", "free/future-luna", "free/codex-auto-review"},
+		},
+		{
+			name: "forced free prefix keeps only allowed routes", prefix: "free", forcePrefix: true,
+			wantIDs: []string{"free/gpt-6-luna", "free/future-luna", "free/codex-auto-review"},
+		},
+		{
+			name: "prefix whitespace is trimmed", prefix: " free ", forcePrefix: true,
+			wantIDs: []string{"free/gpt-6-luna", "free/future-luna", "free/codex-auto-review"},
+		},
+		{
+			name: "other prefix retains all models", prefix: "paid", forcePrefix: true,
+			wantIDs: []string{"paid/gpt-6-luna", "paid/future-luna", "paid/codex-auto-review", "paid/gpt-6-sol", "paid/gpt-6-luna-preview", "paid/codex-auto-review-preview", "paid/luna"},
+		},
+		{
+			name: "similar prefix retains all models", prefix: "free-other", forcePrefix: true,
+			wantIDs: []string{"free-other/gpt-6-luna", "free-other/future-luna", "free-other/codex-auto-review", "free-other/gpt-6-sol", "free-other/gpt-6-luna-preview", "free-other/codex-auto-review-preview", "free-other/luna"},
+		},
+		{
+			name:    "no prefix retains all models",
+			wantIDs: []string{"gpt-6-luna", "future-luna", "codex-auto-review", "gpt-6-sol", "gpt-6-luna-preview", "codex-auto-review-preview", "luna"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			entry := config.CodexKey{APIKey: "free-prefix-test-key", Models: []internalconfig.CodexModel{
+				{Name: "gpt-6-luna"}, {Name: "future-luna"}, {Name: "codex-auto-review"},
+				{Name: "gpt-6-sol"}, {Name: "gpt-6-luna-preview"}, {Name: "codex-auto-review-preview"}, {Name: "luna"},
+			}}
+			service := &Service{cfg: &config.Config{CodexKey: []config.CodexKey{entry}}}
+			service.cfg.ForceModelPrefix = testCase.forcePrefix
+			auth := &coreauth.Auth{
+				ID: "codex-free-prefix-test", Provider: "codex", Prefix: "paid", Status: coreauth.StatusActive,
+				Attributes: map[string]string{coreauth.AttributeAPIKey: entry.APIKey, coreauth.AttributeConfigIndex: "0", coreauth.AttributeSource: "config:codex:test"},
+			}
+			modelRegistry := internalregistry.GetGlobalRegistry()
+			t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+			service.registerModelsForAuth(context.Background(), auth)
+			auth.Prefix = testCase.prefix
+			service.registerModelsForAuth(context.Background(), auth)
+
+			gotIDs := codexModelIDSet(modelRegistry.GetModelsForClient(auth.ID))
+			if len(gotIDs) != len(testCase.wantIDs) {
+				t.Fatalf("registered model IDs = %#v, want %v", gotIDs, testCase.wantIDs)
+			}
+			for _, modelID := range testCase.wantIDs {
+				if _, ok := gotIDs[modelID]; !ok {
+					t.Errorf("missing registered model %q", modelID)
+				}
+			}
+		})
+	}
+}
+
+func TestRegisterModelsForAuthFreePrefixOAuth(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	service.cfg.ForceModelPrefix = true
+	auth := &coreauth.Auth{
+		ID: "codex-free-prefix-oauth-test", Provider: "codex", Prefix: "free", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"plan_type": "pro"},
+	}
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+	service.registerModelsForAuth(context.Background(), auth)
+	gotIDs := codexModelIDSet(modelRegistry.GetModelsForClient(auth.ID))
+	for _, modelID := range []string{"free/gpt-6-luna", "free/gpt-5.6-luna", "free/codex-auto-review"} {
+		if _, ok := gotIDs[modelID]; !ok {
+			t.Errorf("missing registered model %q", modelID)
+		}
+	}
+	if len(gotIDs) != 3 {
+		t.Fatalf("registered model IDs = %#v, want only the two luna models and codex-auto-review", gotIDs)
+	}
+
+	// Excluding all allowed models must also remove the previous registration.
+	auth.Attributes["excluded_models"] = "*-luna,codex-auto-review"
+	service.registerModelsForAuth(context.Background(), auth)
+	if models := modelRegistry.GetModelsForClient(auth.ID); len(models) != 0 {
+		t.Fatalf("registered models after excluding all allowed models = %#v, want none", models)
+	}
+}
+
 func TestRegisterModelsForAuthCodexConfigurationUpdate(t *testing.T) {
 	capableID := ""
 	for _, model := range internalregistry.GetCodexProModels() {
