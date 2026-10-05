@@ -23,6 +23,11 @@ var pluginHostHasAuthProvider = func(host *pluginhost.Host, provider string) boo
 	return host != nil && host.HasAuthProvider(provider)
 }
 
+// pluginHostHasAuthModelProvider only checks declarations, never model discovery.
+var pluginHostHasAuthModelProvider = func(host *pluginhost.Host, provider string) bool {
+	return host != nil && host.HasAuthModelProvider(provider)
+}
+
 type openAICompatibilityRegistrationEntry struct {
 	providerKey string
 	models      []*ModelInfo
@@ -434,6 +439,17 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
+	normalizedModels := normalizeModelsForAuth(a, models)
+	if len(normalizedModels) == 0 {
+		GlobalModelRegistry().UnregisterClient(a.ID)
+		return
+	}
+	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+}
+
+// normalizeModelsForAuth applies registration rules shared by ordinary and
+// fenced catalog publication paths.
+func normalizeModelsForAuth(a *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
 	freePrefix := strings.TrimSpace(a.Prefix) == "free"
 	normalizedModels := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
@@ -454,11 +470,7 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		clone.ID = modelID
 		normalizedModels = append(normalizedModels, &clone)
 	}
-	if len(normalizedModels) == 0 {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
-	}
-	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+	return normalizedModels
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
@@ -518,6 +530,9 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	}
 	if result.Err != nil {
 		return true
+	}
+	if s.coreManager != nil && strings.EqualFold(a.Provider, "antigravity") && !s.antigravityHomeEnabled() {
+		defer s.coreManager.ReconcileRegistryModelStates(ctx, a.ID)
 	}
 	activeAuth := a
 	providerKey := strings.ToLower(strings.TrimSpace(result.Provider))
