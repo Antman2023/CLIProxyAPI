@@ -734,6 +734,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 	pluginStatus := make(chan struct{}, 2)
 	pluginTasks := make(chan struct{})
 	freshCommandProbe := make(chan struct{})
+	var freshCommandProbeOnce sync.Once
 	allowAck := make(chan struct{})
 	stop := make(chan struct{})
 	serverDone := make(chan struct{})
@@ -744,7 +745,7 @@ func TestServiceInitialOverlayStagesPluginWritesUntilReady(t *testing.T) {
 			if errAccept != nil {
 				return
 			}
-			go serveInitialOverlayPluginConnection(conn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, allowAck, stop)
+			go serveInitialOverlayPluginConnection(conn, pluginSync, pluginStatus, pluginTasks, freshCommandProbe, &freshCommandProbeOnce, allowAck, stop)
 		}
 	}()
 	t.Cleanup(func() {
@@ -2514,7 +2515,7 @@ func serveStalePreACKPluginConnection(conn net.Conn, subscriptions *atomic.Int32
 	}
 }
 
-func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}, pluginStatus chan struct{}, pluginTasks chan struct{}, freshCommandProbe chan struct{}, allowAck chan struct{}, stop chan struct{}) {
+func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}, pluginStatus chan struct{}, pluginTasks chan struct{}, freshCommandProbe chan struct{}, freshCommandProbeOnce *sync.Once, allowAck chan struct{}, stop chan struct{}) {
 	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
 	for {
@@ -2558,7 +2559,7 @@ func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}
 				return
 			}
 		case len(args) > 0 && strings.EqualFold(args[0], "PING"):
-			close(freshCommandProbe)
+			freshCommandProbeOnce.Do(func() { close(freshCommandProbe) })
 			if _, errWrite := io.WriteString(conn, "+PONG\r\n"); errWrite != nil {
 				return
 			}
