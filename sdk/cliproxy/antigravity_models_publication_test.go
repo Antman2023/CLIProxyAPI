@@ -18,15 +18,15 @@ func TestAntigravityRegistryPublicationFreePrefix(t *testing.T) {
 	}{
 		{
 			name: "free filters aliased routes", prefix: "free",
-			wantIDs: []string{"future-luna", "free/future-luna", "codex-auto-review", "free/codex-auto-review"},
+			wantIDs: []string{"future-luna", "free/future-luna", "future-terra", "free/future-terra", "codex-auto-review", "free/codex-auto-review"},
 		},
 		{
 			name: "forced free filters aliased routes", prefix: "free", forcePrefix: true,
-			wantIDs: []string{"free/future-luna", "free/codex-auto-review"},
+			wantIDs: []string{"free/future-luna", "free/future-terra", "free/codex-auto-review"},
 		},
 		{
 			name: "other prefix preserves routes", prefix: "paid", forcePrefix: true,
-			wantIDs:   []string{"paid/future-luna", "paid/codex-auto-review", "paid/gpt-oss-120b-medium"},
+			wantIDs:   []string{"paid/future-luna", "paid/future-terra", "paid/codex-auto-review", "paid/gpt-oss-120b-medium"},
 			wantAfter: []string{"paid/gpt-oss-120b-medium"},
 		},
 	} {
@@ -36,6 +36,7 @@ func TestAntigravityRegistryPublicationFreePrefix(t *testing.T) {
 			cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
 				"antigravity": {
 					{Name: "gemini-3.1-flash-lite", Alias: "future-luna"},
+					{Name: "gemini-3-flash", Alias: "future-terra"},
 					{Name: "gemini-pro-agent", Alias: "codex-auto-review"},
 				},
 			}}
@@ -73,7 +74,7 @@ func TestAntigravityRegistryPublicationFreePrefix(t *testing.T) {
 				}
 			}
 			publish(antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{
-				"gemini-3.1-flash-lite": {}, "gemini-pro-agent": {}, "gpt-oss-120b-medium": {},
+				"gemini-3.1-flash-lite": {}, "gemini-3-flash": {}, "gemini-pro-agent": {}, "gpt-oss-120b-medium": {},
 			}, revision: 1})
 			assertIDs(testCase.wantIDs)
 			// An account refresh with only disallowed models must revoke old free routes.

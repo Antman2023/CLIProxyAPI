@@ -20,33 +20,33 @@ func TestRegisterModelsForAuthFreePrefix(t *testing.T) {
 	}{
 		{
 			name: "free keeps allowed models and unprefixed routes", prefix: "free",
-			wantIDs: []string{"gpt-6-luna", "future-luna", "codex-auto-review", "free/gpt-6-luna", "free/future-luna", "free/codex-auto-review"},
+			wantIDs: []string{"gpt-6-luna", "future-luna", "gpt-5.6-terra", "future-terra", "codex-auto-review", "free/gpt-6-luna", "free/future-luna", "free/gpt-5.6-terra", "free/future-terra", "free/codex-auto-review"},
 		},
 		{
 			name: "forced free prefix keeps only allowed routes", prefix: "free", forcePrefix: true,
-			wantIDs: []string{"free/gpt-6-luna", "free/future-luna", "free/codex-auto-review"},
+			wantIDs: []string{"free/gpt-6-luna", "free/future-luna", "free/gpt-5.6-terra", "free/future-terra", "free/codex-auto-review"},
 		},
 		{
 			name: "prefix whitespace is trimmed", prefix: " free ", forcePrefix: true,
-			wantIDs: []string{"free/gpt-6-luna", "free/future-luna", "free/codex-auto-review"},
+			wantIDs: []string{"free/gpt-6-luna", "free/future-luna", "free/gpt-5.6-terra", "free/future-terra", "free/codex-auto-review"},
 		},
 		{
 			name: "other prefix retains all models", prefix: "paid", forcePrefix: true,
-			wantIDs: []string{"paid/gpt-6-luna", "paid/future-luna", "paid/codex-auto-review", "paid/gpt-6-sol", "paid/gpt-6-luna-preview", "paid/codex-auto-review-preview", "paid/luna"},
+			wantIDs: []string{"paid/gpt-6-luna", "paid/future-luna", "paid/gpt-5.6-terra", "paid/future-terra", "paid/codex-auto-review", "paid/gpt-6-sol", "paid/gpt-6-luna-preview", "paid/gpt-5.6-terra-preview", "paid/codex-auto-review-preview", "paid/luna", "paid/terra"},
 		},
 		{
 			name: "similar prefix retains all models", prefix: "free-other", forcePrefix: true,
-			wantIDs: []string{"free-other/gpt-6-luna", "free-other/future-luna", "free-other/codex-auto-review", "free-other/gpt-6-sol", "free-other/gpt-6-luna-preview", "free-other/codex-auto-review-preview", "free-other/luna"},
+			wantIDs: []string{"free-other/gpt-6-luna", "free-other/future-luna", "free-other/gpt-5.6-terra", "free-other/future-terra", "free-other/codex-auto-review", "free-other/gpt-6-sol", "free-other/gpt-6-luna-preview", "free-other/gpt-5.6-terra-preview", "free-other/codex-auto-review-preview", "free-other/luna", "free-other/terra"},
 		},
 		{
 			name:    "no prefix retains all models",
-			wantIDs: []string{"gpt-6-luna", "future-luna", "codex-auto-review", "gpt-6-sol", "gpt-6-luna-preview", "codex-auto-review-preview", "luna"},
+			wantIDs: []string{"gpt-6-luna", "future-luna", "gpt-5.6-terra", "future-terra", "codex-auto-review", "gpt-6-sol", "gpt-6-luna-preview", "gpt-5.6-terra-preview", "codex-auto-review-preview", "luna", "terra"},
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			entry := config.CodexKey{APIKey: "free-prefix-test-key", Models: []internalconfig.CodexModel{
-				{Name: "gpt-6-luna"}, {Name: "future-luna"}, {Name: "codex-auto-review"},
-				{Name: "gpt-6-sol"}, {Name: "gpt-6-luna-preview"}, {Name: "codex-auto-review-preview"}, {Name: "luna"},
+				{Name: "gpt-6-luna"}, {Name: "future-luna"}, {Name: "gpt-5.6-terra"}, {Name: "future-terra"}, {Name: "codex-auto-review"},
+				{Name: "gpt-6-sol"}, {Name: "gpt-6-luna-preview"}, {Name: "gpt-5.6-terra-preview"}, {Name: "codex-auto-review-preview"}, {Name: "luna"}, {Name: "terra"},
 			}}
 			service := &Service{cfg: &config.Config{CodexKey: []config.CodexKey{entry}}}
 			service.cfg.ForceModelPrefix = testCase.forcePrefix
@@ -84,17 +84,17 @@ func TestRegisterModelsForAuthFreePrefixOAuth(t *testing.T) {
 	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
 	service.registerModelsForAuth(context.Background(), auth)
 	gotIDs := codexModelIDSet(modelRegistry.GetModelsForClient(auth.ID))
-	for _, modelID := range []string{"free/gpt-6-luna", "free/gpt-5.6-luna", "free/codex-auto-review"} {
+	for _, modelID := range []string{"free/gpt-6-luna", "free/gpt-5.6-luna", "free/gpt-5.6-terra", "free/codex-auto-review"} {
 		if _, ok := gotIDs[modelID]; !ok {
 			t.Errorf("missing registered model %q", modelID)
 		}
 	}
-	if len(gotIDs) != 3 {
-		t.Fatalf("registered model IDs = %#v, want only the two luna models and codex-auto-review", gotIDs)
+	if len(gotIDs) != 4 {
+		t.Fatalf("registered model IDs = %#v, want only the two luna models, terra, and codex-auto-review", gotIDs)
 	}
 
 	// Excluding all allowed models must also remove the previous registration.
-	auth.Attributes["excluded_models"] = "*-luna,codex-auto-review"
+	auth.Attributes["excluded_models"] = "*-luna,*-terra,codex-auto-review"
 	service.registerModelsForAuth(context.Background(), auth)
 	if models := modelRegistry.GetModelsForClient(auth.ID); len(models) != 0 {
 		t.Fatalf("registered models after excluding all allowed models = %#v, want none", models)

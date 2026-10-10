@@ -462,7 +462,7 @@ func normalizeModelsForAuth(a *coreauth.Auth, models []*ModelInfo) []*ModelInfo 
 		}
 		if freePrefix {
 			baseID := strings.TrimPrefix(modelID, "free/")
-			if baseID != "codex-auto-review" && !strings.HasSuffix(baseID, "-luna") {
+			if baseID != "codex-auto-review" && !strings.HasSuffix(baseID, "-luna") && !strings.HasSuffix(baseID, "-terra") {
 				continue
 			}
 		}
