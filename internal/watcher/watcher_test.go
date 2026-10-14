@@ -230,6 +230,40 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChangedPreservesWritesDuringCallback(t *testing.T) {
+	authDir := t.TempDir()
+	configPath := filepath.Join(authDir, "config.yaml")
+	writeConfig := func(port int) {
+		t.Helper()
+		data := []byte(fmt.Sprintf("port: %d\nauth-dir: %q\n", port, filepath.ToSlash(authDir)))
+		if errWrite := os.WriteFile(configPath, data, 0o600); errWrite != nil {
+			t.Fatalf("write config: %v", errWrite)
+		}
+	}
+	writeConfig(8080)
+	var ports []int
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) {
+			ports = append(ports, cfg.Port)
+			if len(ports) == 1 {
+				// A management save may finish while the previous reload is applying.
+				writeConfig(9090)
+			}
+		},
+	}
+	w.ReloadConfigIfChanged()
+	w.ReloadConfigIfChanged()
+	w.ReloadConfigIfChanged()
+	if len(ports) != 2 || ports[0] != 8080 || ports[1] != 9090 {
+		t.Fatalf("reloaded ports = %v, want [8080 9090]", ports)
+	}
+	if w.config.Port != 9090 {
+		t.Fatalf("runtime port = %d, want 9090", w.config.Port)
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
