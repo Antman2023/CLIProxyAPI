@@ -73,6 +73,33 @@ func TestRegisterModelsForAuthFreePrefix(t *testing.T) {
 	}
 }
 
+func TestRegisterResolvedModelsForAuthFreePrefixRejectsStalePublication(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		models []*ModelInfo
+	}{
+		{name: "allowed models", models: []*ModelInfo{{ID: "free/old-luna"}}},
+		{name: "all models filtered", models: []*ModelInfo{{ID: "free/old-sol"}}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &Service{}
+			auth := &coreauth.Auth{ID: t.Name(), Provider: "codex", Prefix: "free"}
+			modelRegistry := GlobalModelRegistry()
+			t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+			staleFence := newModelRegistrationFence(auth)
+			service.registerResolvedModelsForAuth(auth, "codex", []*ModelInfo{{ID: "free/new-terra"}})
+
+			service.registerResolvedModelsForAuthFenced(auth, staleFence, "codex", testCase.models)
+
+			gotIDs := codexModelIDSet(modelRegistry.GetModelsForClient(auth.ID))
+			_, hasCurrentModel := gotIDs["free/new-terra"]
+			if len(gotIDs) != 1 || !hasCurrentModel {
+				t.Fatalf("models after stale publication = %#v, want only free/new-terra", gotIDs)
+			}
+		})
+	}
+}
+
 func TestRegisterModelsForAuthFreePrefixOAuth(t *testing.T) {
 	service := &Service{cfg: &config.Config{}}
 	service.cfg.ForceModelPrefix = true

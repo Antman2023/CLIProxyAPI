@@ -672,6 +672,9 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	defer cancelLifetime()
 	manager := coreauth.NewManager(store, nil, nil)
 	svc := &Service{cfg: &config.Config{AuthDir: authDir}, coreManager: manager, antigravityContext: lifetime}
+	registrationSignal := &modelRegistrationSignal{changed: make(chan struct{}, 1)}
+	SetGlobalModelRegistryHook(registrationSignal)
+	t.Cleanup(func() { SetGlobalModelRegistryHook(nil) })
 
 	authA := &coreauth.Auth{
 		ID:       "antigravity-slow-save-a.json",
@@ -751,8 +754,20 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 		svc.WaitAntigravityProbes()
 		t.Fatal("stalled persistence on authA blocked subsequent probe for authA")
 	}
-	// Wait for authA's refreshed persistence to preempt authA's first Save and enter Save
-	// (which happens after applyAntigravityModelHints published authA's updated catalog).
+	// Wait for both catalogs before changing authB's registration inputs,
+	// which would invalidate its probe before model publication completes.
+	publicationDeadline := time.After(time.Second)
+	for !GlobalModelRegistry().ClientSupportsModel(authA.ID, "gemini-3.1-flash-lite") ||
+		!GlobalModelRegistry().ClientSupportsModel(authB.ID, "gemini-3-flash") {
+		select {
+		case <-registrationSignal.changed:
+		case <-publicationDeadline:
+			cancelLifetime()
+			svc.WaitAntigravityProbes()
+			t.Fatal("models were not published while metadata persistence was stalled")
+		}
+	}
+	// Wait for a refreshed persistence task to enter Save after publication.
 	select {
 	case <-store.saveEntered:
 	case <-time.After(time.Second):
