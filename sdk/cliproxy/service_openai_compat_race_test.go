@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -18,6 +19,25 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
+
+type modelRegistrationSignal struct {
+	changed chan struct{}
+}
+
+func (s *modelRegistrationSignal) notify() {
+	select {
+	case s.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (s *modelRegistrationSignal) OnModelsRegistered(context.Context, string, string, []*internalregistry.ModelInfo) {
+	s.notify()
+}
+
+func (s *modelRegistrationSignal) OnModelsUnregistered(context.Context, string, string) {
+	s.notify()
+}
 
 func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 	authDir := t.TempDir()
@@ -43,6 +63,9 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 	}
 
 	reg := internalregistry.GetGlobalRegistry()
+	registrationSignal := &modelRegistrationSignal{changed: make(chan struct{}, 1)}
+	reg.SetHook(registrationSignal)
+	t.Cleanup(func() { reg.SetHook(nil) })
 	authID := fileName
 	reg.UnregisterClient(authID)
 	t.Cleanup(func() {
@@ -91,6 +114,9 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 	watcherWrapper.SetAuthUpdateQueue(service.authUpdates)
 	watcherWrapper.SetConfig(service.cfg)
 	t.Cleanup(func() {
+		if errStop := watcherWrapper.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
 		if service.authQueueStop != nil {
 			service.authQueueStop()
 		}
@@ -172,26 +198,29 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Ensure the final persisted configuration is reloaded through the watcher pipeline
-	// and verify both the patched auth prefix and final openai-compatibility model are registered.
-	service.reloadConfigFromWatcher()
-	service.registerConfigAPIKeyAuths(ctx, service.currentConfig())
-
 	finalPrefixModel := fmt.Sprintf("pfx-%d/gpt-6-astra", iterations-1)
-	if !reg.ClientSupportsModel(authID, finalPrefixModel) {
-		t.Fatalf("expected auth %s to support final prefixed model %q", authID, finalPrefixModel)
-	}
-
 	finalCompatAlias := fmt.Sprintf("alias-%d", iterations-1)
-	foundCompatModel := false
-	for _, a := range service.coreManager.List() {
-		if a != nil && reg.ClientSupportsModel(a.ID, finalCompatAlias) {
-			foundCompatModel = true
-			break
+	hasFinalModels := func() bool {
+		if !reg.ClientSupportsModel(authID, finalPrefixModel) {
+			return false
 		}
+		for _, a := range service.coreManager.List() {
+			if a != nil && reg.ClientSupportsModel(a.ID, finalCompatAlias) {
+				return true
+			}
+		}
+		return false
 	}
-	if !foundCompatModel {
-		t.Fatalf("expected registered openai-compatibility auth to support final model %q", finalCompatAlias)
+	// Management config saves apply their snapshots asynchronously. Wait for
+	// registry notifications before asserting that the final models are available.
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for !hasFinalModels() {
+		select {
+		case <-registrationSignal.changed:
+		case <-deadline.C:
+			t.Fatalf("final models were not registered: prefix=%q supported=%v, compatibility=%q", finalPrefixModel, reg.ClientSupportsModel(authID, finalPrefixModel), finalCompatAlias)
+		}
 	}
 }
 
