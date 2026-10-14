@@ -10,13 +10,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -89,33 +87,13 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 		t.Fatalf("watcherFactory failed: %v", errWatcher)
 	}
 	service.watcher = watcherWrapper
-	service.authUpdates = make(chan watcher.AuthUpdate, 256)
-	authConsumerDone := make(chan struct{})
-	authUpdatesApplied := make(chan struct{}, 1)
-	go func() {
-		defer close(authConsumerDone)
-		updateCtx := coreauth.WithSkipPersist(ctx)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case update := <-service.authUpdates:
-				service.handleAuthUpdate(updateCtx, update)
-				select {
-				case authUpdatesApplied <- struct{}{}:
-				default:
-				}
-			}
-		}
-	}()
+	service.ensureAuthUpdateQueue(ctx)
 	watcherWrapper.SetAuthUpdateQueue(service.authUpdates)
 	watcherWrapper.SetConfig(service.cfg)
 	t.Cleanup(func() {
-		if errStop := watcherWrapper.Stop(); errStop != nil {
-			t.Errorf("stop watcher: %v", errStop)
+		if service.authQueueStop != nil {
+			service.authQueueStop()
 		}
-		cancel()
-		<-authConsumerDone
 		for _, a := range service.coreManager.List() {
 			if a != nil {
 				reg.UnregisterClient(a.ID)
@@ -151,9 +129,6 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 	service.registerConfigAPIKeyAuths(ctx, service.cfg)
-	if errStart := watcherWrapper.Start(ctx); errStart != nil {
-		t.Fatalf("start watcher: %v", errStart)
-	}
 
 	const iterations = 10
 	start := make(chan struct{})
@@ -203,28 +178,20 @@ func TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559(t *testing.T) {
 	service.registerConfigAPIKeyAuths(ctx, service.currentConfig())
 
 	finalPrefixModel := fmt.Sprintf("pfx-%d/gpt-6-astra", iterations-1)
-	finalCompatAlias := fmt.Sprintf("alias-%d", iterations-1)
-	hasFinalModels := func() bool {
-		if !reg.ClientSupportsModel(authID, finalPrefixModel) {
-			return false
-		}
-		for _, a := range service.coreManager.List() {
-			if a != nil && reg.ClientSupportsModel(a.ID, finalCompatAlias) {
-				return true
-			}
-		}
-		return false
+	if !reg.ClientSupportsModel(authID, finalPrefixModel) {
+		t.Fatalf("expected auth %s to support final prefixed model %q", authID, finalPrefixModel)
 	}
-	// Config reloads enqueue auth updates after the synchronous runtime callback.
-	// Wait for consumer completion instead of racing the pending registrations.
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for !hasFinalModels() {
-		select {
-		case <-authUpdatesApplied:
-		case <-deadline.C:
-			t.Fatalf("final models were not registered: prefix=%q supported=%v, compatibility=%q", finalPrefixModel, reg.ClientSupportsModel(authID, finalPrefixModel), finalCompatAlias)
+
+	finalCompatAlias := fmt.Sprintf("alias-%d", iterations-1)
+	foundCompatModel := false
+	for _, a := range service.coreManager.List() {
+		if a != nil && reg.ClientSupportsModel(a.ID, finalCompatAlias) {
+			foundCompatModel = true
+			break
 		}
+	}
+	if !foundCompatModel {
+		t.Fatalf("expected registered openai-compatibility auth to support final model %q", finalCompatAlias)
 	}
 }
 

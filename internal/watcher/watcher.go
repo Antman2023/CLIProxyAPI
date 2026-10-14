@@ -36,7 +36,6 @@ type Watcher struct {
 	config            *config.Config
 	clientsMutex      sync.RWMutex
 	authRescanMu      sync.Mutex
-	configLoadMu      sync.Mutex
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
 	serverUpdateMu    sync.Mutex
@@ -147,9 +146,6 @@ func (w *Watcher) Stop() error {
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()
-	// Wait for an active config callback before tearing down its consumers.
-	w.configLoadMu.Lock()
-	defer w.configLoadMu.Unlock()
 	return w.watcher.Close()
 }
 

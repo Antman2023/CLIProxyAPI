@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -455,25 +454,23 @@ func TestHomeInFlightPublisherReplacementStopsOldLifetimeAndPinsDependencies(t *
 }
 
 func TestHomeInFlightPublisherAppliesConfigUpdateAtNextTimerCycle(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		manager := NewManager(nil, nil, nil)
-		manager.ApplyHomeInFlightPublisherConfig(homeInFlightPublisherTestConfig(60 * time.Millisecond))
-		transport := newHomeInFlightLifecycleTransport(true)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go manager.StartHomeInFlightPublisher(ctx, transport, executionregistry.New())
-		waitForHomeInFlightPublisherPayload(t, transport.payloads)
+	manager := NewManager(nil, nil, nil)
+	manager.ApplyHomeInFlightPublisherConfig(homeInFlightPublisherTestConfig(60 * time.Millisecond))
+	transport := newHomeInFlightLifecycleTransport(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go manager.StartHomeInFlightPublisher(ctx, transport, executionregistry.New())
+	waitForHomeInFlightPublisherPayload(t, transport.payloads)
 
-		manager.ApplyHomeInFlightPublisherConfig(homeInFlightPublisherTestConfig(10 * time.Millisecond))
-		select {
-		case published := <-transport.payloads:
-			t.Fatalf("publisher applied hot interval before the next timer cycle at %v", published)
-		case <-time.After(30 * time.Millisecond):
-		}
-		second := waitForHomeInFlightPublisherPayload(t, transport.payloads)
-		third := waitForHomeInFlightPublisherPayload(t, transport.payloads)
-		if elapsed := third.observedAt.Sub(second.observedAt); elapsed > 35*time.Millisecond {
-			t.Fatalf("publisher interval after update = %v, want <= 35ms", elapsed)
-		}
-	})
+	manager.ApplyHomeInFlightPublisherConfig(homeInFlightPublisherTestConfig(10 * time.Millisecond))
+	select {
+	case published := <-transport.payloads:
+		t.Fatalf("publisher applied hot interval before the next timer cycle at %v", published)
+	case <-time.After(30 * time.Millisecond):
+	}
+	second := waitForHomeInFlightPublisherPayload(t, transport.payloads)
+	third := waitForHomeInFlightPublisherPayload(t, transport.payloads)
+	if elapsed := third.observedAt.Sub(second.observedAt); elapsed > 35*time.Millisecond {
+		t.Fatalf("publisher interval after update = %v, want <= 35ms", elapsed)
+	}
 }
