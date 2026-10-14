@@ -449,6 +449,18 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
+	normalizedModels := normalizeModelsForAuth(a, models)
+	if len(normalizedModels) == 0 {
+		GlobalModelRegistry().UnregisterClient(a.ID)
+		return
+	}
+	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+}
+
+// normalizeModelsForAuth applies registration rules shared by ordinary and
+// fenced catalog publication paths.
+func normalizeModelsForAuth(a *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
+	freePrefix := strings.TrimSpace(a.Prefix) == "free"
 	normalizedModels := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model == nil {
@@ -458,15 +470,17 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		if modelID == "" {
 			continue
 		}
+		if freePrefix {
+			baseID := strings.TrimPrefix(modelID, "free/")
+			if baseID != "codex-auto-review" && !strings.HasSuffix(baseID, "-luna") && !strings.HasSuffix(baseID, "-terra") {
+				continue
+			}
+		}
 		clone := *model
 		clone.ID = modelID
 		normalizedModels = append(normalizedModels, &clone)
 	}
-	if len(normalizedModels) == 0 {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
-	}
-	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+	return normalizedModels
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {

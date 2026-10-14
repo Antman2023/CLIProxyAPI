@@ -1794,7 +1794,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if !eligibility.allows(candidate) {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) &&
+			!m.credentialPolicyAllowsExcludedModel(eligibility.credentialPolicy, candidate, model) {
 			continue
 		}
 		if trackTransientAffinity {

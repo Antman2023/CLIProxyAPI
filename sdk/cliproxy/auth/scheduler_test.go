@@ -400,7 +400,7 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"websockets": "false"}},
 		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
 		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
 	)
@@ -452,7 +452,7 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10", "websockets": "false"}},
 		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
 		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
 	)
@@ -813,7 +813,7 @@ func TestSchedulerPick_RoundRobinPreservesWebsocketSuccessorAcrossCooldown(t *te
 	wsA := &Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
 	wsB := &Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
 	wsC := &Auth{ID: "codex-ws-c", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
-	httpOnly := &Auth{ID: "codex-http", Provider: "codex"}
+	httpOnly := &Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"websockets": "false"}}
 	scheduler := newSchedulerForTest(&RoundRobinSelector{}, httpOnly, wsA, wsB, wsC)
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
@@ -1303,6 +1303,80 @@ func TestManagerCodexAlphaSearchPolicyRejectsOrdinaryAPIKey(t *testing.T) {
 	var authErr *Error
 	if !errors.As(errSelect, &authErr) || authErr.Code != "auth_not_found" {
 		t.Fatalf("SelectAuthWithCredentialPolicy() error = %#v, want auth_not_found", errSelect)
+	}
+}
+
+func TestManagerCodexAlphaSearchPolicyAllowsExcludedModel(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	credential := &Auth{
+		ID:       "codex-oauth-excluded-search-model",
+		Provider: "codex",
+		Metadata: map[string]any{"access_token": "token"},
+		Attributes: map[string]string{
+			"excluded_models": "gpt-5.4",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	registerSchedulerModels(t, "codex", "gpt-5.5", credential.ID)
+
+	if selected, errSelect := manager.SelectAuth(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}); selected != nil || errSelect == nil {
+		t.Fatalf("SelectAuth() = (%#v, %v), want excluded model rejection", selected, errSelect)
+	}
+
+	pluginScheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: credential.ID},
+		handled: true,
+	}
+	manager.SetPluginScheduler(pluginScheduler)
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "gpt-5.4", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != credential.ID {
+		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want %s", selected, credential.ID)
+	}
+	if len(pluginScheduler.requests) != 1 || pluginScheduler.requests[0].Model != "gpt-5.4" {
+		t.Fatalf("plugin scheduler requests = %#v, want original model", pluginScheduler.requests)
+	}
+}
+
+func TestManagerCodexAlphaSearchPolicyKeepsPrefixRoutingForExcludedModel(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, credential := range []*Auth{
+		{
+			ID:       "codex-team-a-excluded-search-model",
+			Provider: "codex",
+			Prefix:   "team-a",
+			Metadata: map[string]any{"access_token": "token-a"},
+			Attributes: map[string]string{
+				"excluded_models": "gpt-5.*",
+			},
+		},
+		{
+			ID:       "codex-team-b-excluded-search-model",
+			Provider: "codex",
+			Prefix:   "team-b",
+			Metadata: map[string]any{"access_token": "token-b"},
+			Attributes: map[string]string{
+				"excluded_models": "gpt-5.*",
+			},
+		},
+	} {
+		if _, errRegister := manager.Register(context.Background(), credential); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", credential.ID, errRegister)
+		}
+	}
+
+	selected, errSelect := manager.SelectAuthWithCredentialPolicy(context.Background(), "codex", "team-b/gpt-5.4", CredentialPolicyCodexAlphaSearchV1, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthWithCredentialPolicy() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "codex-team-b-excluded-search-model" {
+		t.Fatalf("SelectAuthWithCredentialPolicy() auth = %#v, want team-b credential", selected)
 	}
 }
 

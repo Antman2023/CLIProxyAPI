@@ -703,6 +703,7 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 		// remain strict: an epoch from another publisher may use newer auth settings.
 		s.cfgMu.RLock()
 		models := s.antigravityModelsForHintsWithConfig(auth, hints, s.cfg)
+		models = normalizeModelsForAuth(auth, models)
 		// Fence the cache-to-registry publication as well as the network result.
 		// A newer successful catalog must never be replaced by an older caller.
 		antigravityCapabilityMu.Lock()

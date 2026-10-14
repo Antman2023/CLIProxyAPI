@@ -1272,7 +1272,7 @@ func TestEndToEndAuthFileReplacement_RestoresModelsInV1ModelsWithoutRestart(t *t
 
 	// Synthetic JWT containing CodexAuthInfo claims with chatgpt_plan_type: team
 	teamIDToken := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJ1c2VyQGV4YW1wbGUuY29tIiwgImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6IHsiY2hhdGdwdF9wbGFuX3R5cGUiOiAidGVhbSIsICJjaGF0Z3B0X2FjY291bnRfaWQiOiAiYWNjLTEyMyJ9fQ.sig"
-	initialContent := fmt.Sprintf(`{"type":"codex","email":"user@example.com","access_token":"token-old","id_token":%q}`, teamIDToken)
+	initialContent := fmt.Sprintf(`{"type":"codex","prefix":"paid","email":"user@example.com","access_token":"token-old","id_token":%q}`, teamIDToken)
 	if errWrite := os.WriteFile(filePath, []byte(initialContent), 0o600); errWrite != nil {
 		t.Fatalf("write auth file: %v", errWrite)
 	}
@@ -1317,6 +1317,7 @@ func TestEndToEndAuthFileReplacement_RestoresModelsInV1ModelsWithoutRestart(t *t
 		ID:       authID,
 		FileName: fileName,
 		Provider: "codex",
+		Prefix:   "paid",
 		Status:   coreauth.StatusActive,
 		Metadata: map[string]any{
 			"type":         "codex",
@@ -1399,7 +1400,7 @@ func TestEndToEndAuthFileReplacement_RestoresModelsInV1ModelsWithoutRestart(t *t
 	}
 
 	// 3. Replace credential via management upload (POST /v0/management/auth-files)
-	newContent := fmt.Sprintf(`{"type":"codex","email":"user@example.com","access_token":"token-new","id_token":%q}`, teamIDToken)
+	newContent := fmt.Sprintf(`{"type":"codex","prefix":"paid","email":"user@example.com","access_token":"token-new","id_token":%q}`, teamIDToken)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("file", fileName)

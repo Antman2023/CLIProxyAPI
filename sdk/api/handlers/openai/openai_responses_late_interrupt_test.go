@@ -20,6 +20,59 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestResponsesTerminalEventRetiresLocalInterruptBeforeStreamCloses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, event := range []string{"response.completed", "response.done", "response.incomplete"} {
+		t.Run(event, func(t *testing.T) {
+			local := newResponsesLocalInterrupt()
+			data := make(chan []byte, 1)
+			data <- []byte(fmt.Sprintf(`{"type":%q,"response":{"id":"r1","output":[]}}`, event))
+			serverErrCh := make(chan error, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+				if errUpgrade != nil {
+					serverErrCh <- errUpgrade
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = r
+				_, _, _, _, errForward := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+					ctx, newResponsesWebsocketWriter(conn), func(...interface{}) {},
+					data, nil, nil, "terminal-interrupt", responsesWebsocketForwardOptions{localInterrupt: local},
+				)
+				serverErrCh <- errForward
+			}))
+			defer server.Close()
+			defer func() {
+				close(data)
+				if errServer := <-serverErrCh; errServer != nil {
+					t.Errorf("forward response: %v", errServer)
+				}
+			}()
+			client, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			if errDial != nil {
+				t.Fatal(errDial)
+			}
+			defer func() { _ = client.Close() }()
+			if errDeadline := client.SetReadDeadline(time.Now().Add(3 * time.Second)); errDeadline != nil {
+				t.Fatal(errDeadline)
+			}
+			_, payload, errRead := client.ReadMessage()
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if got := gjson.GetBytes(payload, "type").String(); got != event {
+				t.Fatalf("event = %q, want %q", got, event)
+			}
+			// Keep data open to exercise completion before the stream finishes.
+			if local.deliver([]byte(`{"type":"response.interrupt","response_id":"unknown"}`)) {
+				t.Fatal("terminal response still accepted local cancellation")
+			}
+		})
+	}
+}
+
 // A delayed control frame must not queue an error for the next create, nor
 // cancel its response when the old response ID is repeated during that turn.
 func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {

@@ -1,0 +1,126 @@
+name: Sync upstream release and publish
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: router-for-me/CLIProxyAPI
+  TARGET_BRANCH: main
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Configure upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null ||             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --force --tags origin
+
+      - name: Detect new official upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/latest")"
+          upstream_tag="$(jq -r '.tag_name' <<<"${release_json}")"
+          prerelease="$(jq -r '.prerelease' <<<"${release_json}")"
+          draft="$(jq -r '.draft' <<<"${release_json}")"
+
+          if [[ "${draft}" != "false" || "${prerelease}" != "false" ]]; then
+            echo "new_release=false" >> "${GITHUB_OUTPUT}"
+            echo "Latest upstream release is not a final release; skipping."
+            exit 0
+          fi
+
+          if [[ ! "${upstream_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected upstream release tag: ${upstream_tag}"
+            exit 1
+          fi
+
+          if git tag --list "${upstream_tag}-antman.*" | grep -q .; then
+            echo "new_release=false" >> "${GITHUB_OUTPUT}"
+            echo "tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+            echo "Already published an Antman release for ${upstream_tag}; nothing to do."
+            exit 0
+          fi
+
+          echo "new_release=true" >> "${GITHUB_OUTPUT}"
+          echo "tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "New official upstream release detected: ${upstream_tag}"
+
+      - name: Fetch upstream release tag
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force upstream             "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+
+      - name: Merge released upstream commit
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          release_commit="$(git rev-parse "${UPSTREAM_TAG}^{commit}")"
+
+          if git merge-base --is-ancestor "${release_commit}" HEAD; then
+            echo "Current main already contains ${UPSTREAM_TAG}; no merge needed."
+            exit 0
+          fi
+
+          if ! git merge --no-edit "${release_commit}"; then
+            echo "::error::Merge conflict while syncing official upstream release ${UPSTREAM_TAG}. No changes were pushed."
+            git merge --abort || true
+            exit 1
+          fi
+
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Verify release commit is included
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "${UPSTREAM_TAG}^{commit}" HEAD; then
+            echo "::error::Current main does not contain ${UPSTREAM_TAG}."
+            exit 1
+          fi
+
+      - name: Dispatch release workflow
+        if: steps.release.outputs.new_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yaml             --repo "${GITHUB_REPOSITORY}"             --ref "${TARGET_BRANCH}"             -f "upstream_tag=${UPSTREAM_TAG}"
+
+          echo "Dispatched release.yaml for ${UPSTREAM_TAG}."

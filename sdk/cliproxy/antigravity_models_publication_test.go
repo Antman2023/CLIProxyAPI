@@ -8,6 +8,84 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func TestAntigravityRegistryPublicationFreePrefix(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		prefix      string
+		forcePrefix bool
+		wantIDs     []string
+		wantAfter   []string
+	}{
+		{
+			name: "free filters aliased routes", prefix: "free",
+			wantIDs: []string{"future-luna", "free/future-luna", "future-terra", "free/future-terra", "codex-auto-review", "free/codex-auto-review"},
+		},
+		{
+			name: "forced free filters aliased routes", prefix: "free", forcePrefix: true,
+			wantIDs: []string{"free/future-luna", "free/future-terra", "free/codex-auto-review"},
+		},
+		{
+			name: "other prefix preserves routes", prefix: "paid", forcePrefix: true,
+			wantIDs:   []string{"paid/future-luna", "paid/future-terra", "paid/codex-auto-review", "paid/gpt-oss-120b-medium"},
+			wantAfter: []string{"paid/gpt-oss-120b-medium"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			resetAntigravityCapabilityCache()
+			t.Cleanup(resetAntigravityCapabilityCache)
+			cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+				"antigravity": {
+					{Name: "gemini-3.1-flash-lite", Alias: "future-luna"},
+					{Name: "gemini-3-flash", Alias: "future-terra"},
+					{Name: "gemini-pro-agent", Alias: "codex-auto-review"},
+				},
+			}}
+			cfg.ForceModelPrefix = testCase.forcePrefix
+			manager := coreauth.NewManager(nil, nil, nil)
+			svc := &Service{cfg: cfg, coreManager: manager}
+			auth := antigravityTestAuth("publication-free-prefix", "http://127.0.0.1:1")
+			auth.Prefix = testCase.prefix
+			var err error
+			auth, err = manager.Register(t.Context(), auth)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reg := GlobalModelRegistry()
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			key := svc.antigravityCapabilityKey(auth)
+			publish := func(hints antigravityModelCapabilityHints) {
+				t.Helper()
+				antigravityCapabilityMu.Lock()
+				antigravityCapabilityCache[key] = antigravityCapabilityCacheEntry{hints: hints, probeRevision: hints.revision}
+				antigravityCapabilityMu.Unlock()
+				epoch := reg.ClientRegistrationEpoch(auth.ID)
+				svc.applyAntigravityModelHints(t.Context(), auth, "antigravity", hints, key, auth.RegistrationEpoch, epoch)
+			}
+			assertIDs := func(want []string) {
+				t.Helper()
+				got := codexModelIDSet(reg.GetModelsForClient(auth.ID))
+				if len(got) != len(want) {
+					t.Fatalf("registered models = %v, want %v", got, want)
+				}
+				for _, id := range want {
+					if _, ok := got[id]; !ok {
+						t.Errorf("missing registered model %q", id)
+					}
+				}
+			}
+			publish(antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{
+				"gemini-3.1-flash-lite": {}, "gemini-3-flash": {}, "gemini-pro-agent": {}, "gpt-oss-120b-medium": {},
+			}, revision: 1})
+			assertIDs(testCase.wantIDs)
+			// An account refresh with only disallowed models must revoke old free routes.
+			publish(antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{
+				"gpt-oss-120b-medium": {},
+			}, revision: 2})
+			assertIDs(testCase.wantAfter)
+		})
+	}
+}
+
 func TestAntigravityPublishedCacheDoesNotReconcileEmptyRegistry(t *testing.T) {
 	resetAntigravityCapabilityCache()
 	t.Cleanup(resetAntigravityCapabilityCache)
