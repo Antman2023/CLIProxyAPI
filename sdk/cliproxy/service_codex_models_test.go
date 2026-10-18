@@ -86,8 +86,8 @@ func TestRegisterResolvedModelsForAuthFreePrefixRejectsStalePublication(t *testi
 			auth := &coreauth.Auth{ID: t.Name(), Provider: "codex", Prefix: "free"}
 			modelRegistry := GlobalModelRegistry()
 			t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
-			staleFence := newModelRegistrationFence(auth)
-			service.registerResolvedModelsForAuth(auth, "codex", []*ModelInfo{{ID: "free/new-terra"}})
+			staleFence := newModelRegistrationFence(auth, nil)
+			service.registerResolvedModelsForAuthFenced(auth, newModelRegistrationFence(auth, nil), "codex", []*ModelInfo{{ID: "free/new-terra"}})
 
 			service.registerResolvedModelsForAuthFenced(auth, staleFence, "codex", testCase.models)
 
