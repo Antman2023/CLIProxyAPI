@@ -1619,6 +1619,29 @@ func TestInspectRecoveryBaselineFailureClosesRepositoryHandle(t *testing.T) {
 	assertRemoteBranchContents(t, remoteDir, "master", "remote master branch\n")
 }
 
+func TestIsRepositoryCorruptionErrorMissingPackfile(t *testing.T) {
+	missingPack := &os.PathError{Op: "stat", Path: filepath.Join("objects", "pack", "missing.pack"), Err: os.ErrNotExist}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "missing pack", err: missingPack, want: true},
+		{name: "wrapped missing pack", err: errors.Join(errors.New("packhandle: pack size"), missingPack), want: true},
+		{name: "missing worktree file", err: &os.PathError{Op: "stat", Path: "config.yaml", Err: os.ErrNotExist}},
+		{name: "pack permission denied", err: &os.PathError{Op: "stat", Path: missingPack.Path, Err: os.ErrPermission}},
+		{name: "missing file without path", err: os.ErrNotExist},
+		{name: "nil"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRepositoryCorruptionError(tt.err); got != tt.want {
+				t.Fatalf("isRepositoryCorruptionError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCommitAndPushLockedPushesBeforeRunningGC(t *testing.T) {
 	root := t.TempDir()
 	remoteDir := setupGitRemoteRepository(t, root, "master",
@@ -1798,13 +1821,13 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
-	defer func() {
-		if errClose := repo.Close(); errClose != nil {
-			t.Errorf("close corrupted repository: %v", errClose)
-		}
-	}()
-	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
+	errRepack := repo.RepackObjects(&git.RepackConfig{})
+	errClose := repo.Close()
+	if errRepack != nil {
 		t.Fatalf("repack repository objects: %v", errRepack)
+	}
+	if errClose != nil {
+		t.Fatalf("close repository before corruption: %v", errClose)
 	}
 	objectsDir := filepath.Join(repoDir, ".git", "objects")
 	objectEntries, errReadDir := os.ReadDir(objectsDir)
@@ -1830,6 +1853,16 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
+	// Reopen so cached objects and pack handles cannot hide the missing packfiles.
+	repo, errOpen = git.PlainOpen(repoDir)
+	if errOpen != nil {
+		t.Fatalf("open corrupted repository: %v", errOpen)
+	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close corrupted repository: %v", errClose)
+		}
+	}()
 	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}

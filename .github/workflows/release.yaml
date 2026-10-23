@@ -22,7 +22,7 @@ permissions:
 env:
   GH_REPO: ${{ github.repository }}
   UPSTREAM_REPO: router-for-me/CLIProxyAPI
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.26.10'
 
 jobs:
   prepare-release:
