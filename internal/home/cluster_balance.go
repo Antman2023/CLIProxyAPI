@@ -35,6 +35,16 @@ type clusterBalanceState struct {
 	unsupported bool
 }
 
+type rebalanceConn struct {
+	net.Conn
+	stopCancel func() bool
+}
+
+func (c *rebalanceConn) Close() error {
+	c.stopCancel()
+	return c.Conn.Close()
+}
+
 func (c *Client) canExecuteRebalanceLocked() bool {
 	return c.managed && c.clusterDiscoveryEnabledLocked() && !c.legacyMembership &&
 		c.lifecycle.LifecycleConfigRevision > 0 && c.heartbeatOK.Load() &&
@@ -58,7 +68,16 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 	}
 	options.ReadTimeout = -1
 	options.WriteTimeout = -1
-	options.Dialer = redis.NewDialer(options)
+	dialer := redis.NewDialer(options)
+	options.Dialer = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, errDial := dialer(dialCtx, network, address)
+		if errDial != nil {
+			return nil, errDial
+		}
+		// Close the socket directly: pool shutdown can wait on an active read during its health check.
+		stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		return &rebalanceConn{Conn: conn, stopCancel: stopCancel}, nil
+	}
 	command := redis.NewClient(options)
 	stopCancel := context.AfterFunc(ctx, func() { _ = command.Close() })
 	defer func() {
