@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -79,6 +81,13 @@ func TestClusterBalanceRegistrationErrorsDoNotDisableCapability(t *testing.T) {
 	}
 }
 
+// manuallyExpiredHeartbeatConn lets the test expire a pending read after the RPC blocks.
+type manuallyExpiredHeartbeatConn struct {
+	net.Conn
+}
+
+func (c *manuallyExpiredHeartbeatConn) SetReadDeadline(time.Time) error { return nil }
+
 func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 	for _, blockedOperation := range []string{"ENABLE", "CLAIM", "PING", "RESULT"} {
 		t.Run(blockedOperation, func(t *testing.T) {
@@ -114,12 +123,6 @@ func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 					return "$22\r\n{\"ok\":true,\"nodes\":[]}\r\n"
 				case "GET":
 					return "$2\r\n{}\r\n"
-				case "SUBSCRIBE":
-					reply := "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
-					if blockedOperation == "CLAIM" || blockedOperation == "PING" {
-						reply += fmt.Sprintf("*3\r\n$7\r\nmessage\r\n$9\r\nrebalance\r\n$%d\r\n%s\r\n", len(instruction), instruction)
-					}
-					return reply
 				default:
 					return balanceTestRedisReply(args)
 				}
@@ -135,6 +138,39 @@ func TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				done <- client.RunConfigSubscriberLifetime(ctx, func([]byte) error {
+					// Keep setup independent of wall-clock heartbeat deadlines. Expire the
+					// subscription read explicitly once the rebalance RPC has started.
+					sub := redis.NewClient(&redis.Options{
+						Addr: "heartbeat-test", Protocol: 2, DisableIdentity: true, MaxRetries: -1,
+						Dialer: func(context.Context, string, string) (net.Conn, error) {
+							local, peer := net.Pipe()
+							go serveRedisCommandTestConn(peer, &redisCommandLog{}, func(args []string) string {
+								if !strings.EqualFold(args[0], "SUBSCRIBE") {
+									return balanceTestRedisReply(args)
+								}
+								go func() {
+									select {
+									case <-blocked:
+										_ = local.SetReadDeadline(time.Now().Add(-time.Second))
+									case <-ctx.Done():
+									}
+								}()
+								reply := "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n"
+								if blockedOperation == "CLAIM" || blockedOperation == "PING" {
+									reply += fmt.Sprintf("*3\r\n$7\r\nmessage\r\n$9\r\nrebalance\r\n$%d\r\n%s\r\n", len(instruction), instruction)
+								}
+								return reply
+							})
+							return &manuallyExpiredHeartbeatConn{Conn: local}, nil
+						},
+					})
+					client.mu.Lock()
+					previousSub := client.sub
+					client.sub = sub
+					client.mu.Unlock()
+					if errClose := previousSub.Close(); errClose != nil {
+						return errClose
+					}
 					return client.SetLifecycleConfig(config.CredentialConcurrencyConfig{
 						LifecycleConfigRevision: 1, CPAHeartbeatTimeout: 200 * time.Millisecond,
 					})
@@ -239,5 +275,84 @@ func TestClusterBalanceMalformedRegistrationEndsSubscriberBeforeReady(t *testing
 	}
 	if ready || client.HeartbeatOK() {
 		t.Fatal("malformed registration published a healthy subscriber")
+	}
+}
+
+type blockingOuterCloseConn struct {
+	net.Conn
+	enteredClose     chan struct{}
+	enterOnce        sync.Once
+	underlyingClosed chan struct{}
+}
+
+func (c *blockingOuterCloseConn) NetConn() net.Conn {
+	return c.Conn
+}
+
+func (c *blockingOuterCloseConn) Close() error {
+	if c.enteredClose != nil {
+		c.enterOnce.Do(func() { close(c.enteredClose) })
+	}
+	<-c.underlyingClosed
+	return c.Conn.Close()
+}
+
+type trackingUnderlyingConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *trackingUnderlyingConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func TestCancelableConnClosesUnderlyingTransportWhenCloseRacesCancel(t *testing.T) {
+	for _, mode := range []string{"pre-canceled", "after-wrap", "during-close"} {
+		t.Run(mode, func(t *testing.T) {
+			for range 32 {
+				local, peer := net.Pipe()
+				t.Cleanup(func() {
+					_ = local.Close()
+					_ = peer.Close()
+				})
+				underlying := &trackingUnderlyingConn{Conn: local, closed: make(chan struct{})}
+				enteredClose := make(chan struct{})
+				outer := &blockingOuterCloseConn{
+					Conn:             underlying,
+					enteredClose:     enteredClose,
+					underlyingClosed: underlying.closed,
+				}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if mode == "pre-canceled" {
+					cancel()
+				}
+				wrapped := newPluginSyncCancelableConn(ctx, outer)
+				if mode == "after-wrap" {
+					cancel()
+				}
+
+				done := make(chan error, 1)
+				go func() {
+					done <- wrapped.Close()
+				}()
+				if mode == "during-close" {
+					<-enteredClose
+					cancel()
+				}
+				select {
+				case errClose := <-done:
+					if errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+						t.Fatalf("close error = %v", errClose)
+					}
+				case <-time.After(500 * time.Millisecond):
+					_ = underlying.Close()
+					t.Fatal("Close blocked because underlying transport was not closed before outer Close")
+				}
+			}
+		})
 	}
 }
