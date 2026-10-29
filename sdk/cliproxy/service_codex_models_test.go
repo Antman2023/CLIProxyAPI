@@ -111,13 +111,14 @@ func TestRegisterModelsForAuthFreePrefixOAuth(t *testing.T) {
 	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
 	service.registerModelsForAuth(context.Background(), auth)
 	gotIDs := codexModelIDSet(modelRegistry.GetModelsForClient(auth.ID))
-	for _, modelID := range []string{"free/gpt-6-luna", "free/gpt-5.6-luna", "free/gpt-5.6-terra", "free/codex-auto-review"} {
+	wantIDs := []string{"free/gpt-6-luna", "free/gpt-5.6-luna", "free/gpt-5.6-terra", "free/gpt-6.1-terra", "free/codex-auto-review"}
+	for _, modelID := range wantIDs {
 		if _, ok := gotIDs[modelID]; !ok {
 			t.Errorf("missing registered model %q", modelID)
 		}
 	}
-	if len(gotIDs) != 4 {
-		t.Fatalf("registered model IDs = %#v, want only the two luna models, terra, and codex-auto-review", gotIDs)
+	if len(gotIDs) != len(wantIDs) {
+		t.Fatalf("registered model IDs = %#v, want %v", gotIDs, wantIDs)
 	}
 
 	// Excluding all allowed models must also remove the previous registration.
