@@ -228,7 +228,7 @@ func devinPatchReasonCode(reason string) string {
 	}
 	if strings.HasPrefix(reason, "decode apply_patch input value: ") {
 		switch {
-		case strings.HasSuffix(reason, "in string literal"), strings.HasSuffix(reason, "in string"):
+		case strings.HasSuffix(reason, "in string literal"):
 			return "invalid control character in apply_patch input"
 		case strings.HasPrefix(reason, "decode apply_patch input value: invalid character ") && strings.HasSuffix(reason, " in string"):
 			quoted := strings.TrimSuffix(strings.TrimPrefix(reason, "decode apply_patch input value: invalid character "), " in string")
