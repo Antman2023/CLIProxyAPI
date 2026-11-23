@@ -21,7 +21,13 @@ func nativeStoreGit(t *testing.T, dir string, args ...string) string {
 	if errLookup != nil {
 		t.Skip("native Git is required")
 	}
-	args = append([]string{"-C", dir, "-c", "user.name=Git Store Test", "-c", "user.email=git-store@example.test", "-c", "commit.gpgsign=false"}, args...)
+	// Keep native Git from running maintenance on the temporary worktree.
+	args = append([]string{"-C", dir,
+		"-c", "user.name=Git Store Test",
+		"-c", "user.email=git-store@example.test",
+		"-c", "commit.gpgsign=false",
+		"-c", "maintenance.auto=false",
+	}, args...)
 	cmd := exec.Command(gitPath, args...)
 	out, errRun := cmd.CombinedOutput()
 	if errRun != nil {

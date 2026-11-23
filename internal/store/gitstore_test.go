@@ -1961,6 +1961,15 @@ func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches
 	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(defaultBranch))); err != nil {
 		t.Fatalf("set remote HEAD: %v", err)
 	}
+	remoteConfig, errConfig := remoteRepo.Config()
+	if errConfig != nil {
+		t.Fatalf("get test remote config: %v", errConfig)
+	}
+	// Native pushes must leave the temporary remote's objects stable for go-git readers.
+	remoteConfig.Raw.Section("receive").SetOption("autogc", "false")
+	if errSetConfig := remoteRepo.SetConfig(remoteConfig); errSetConfig != nil {
+		t.Fatalf("disable automatic maintenance on test remote: %v", errSetConfig)
+	}
 
 	return remoteDir
 }
