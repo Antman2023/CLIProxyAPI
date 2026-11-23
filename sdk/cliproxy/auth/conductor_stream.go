@@ -249,7 +249,10 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 						failed = true
 						return false
 					}
-					if !isRequestScopedError(chunk.Err) {
+					// Some executors report a protocol-level upstream failure as a
+					// transient HTTP status to avoid cooling the selected credential.
+					upstreamFailure := errorCodeFromError(chunk.Err) == transientTransportErrorCode && statusCodeFromError(chunk.Err) > 0
+					if !isRequestScopedError(chunk.Err) && !upstreamFailure {
 						failed = true
 						return false
 					}
@@ -329,6 +332,21 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 				return true
 			}
 		}
+		drain := func() {
+			if remaining == nil {
+				return
+			}
+			forward = false
+			// Close the downstream stream promptly on cancellation. An executor
+			// may still finish reporting an upstream error it already observed.
+			go func() {
+				for chunk := range remaining {
+					if !failed && chunk.Err != nil {
+						emit(chunk)
+					}
+				}
+			}()
+		}
 		for _, chunk := range buffered {
 			if !forward {
 				break
@@ -337,7 +355,7 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 				if cancelAttempt != nil {
 					cancelAttempt()
 				}
-				discardStreamChunks(remaining)
+				drain()
 				return
 			}
 		}
@@ -357,7 +375,7 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 						if cancelAttempt != nil {
 							cancelAttempt()
 						}
-						discardStreamChunks(remaining)
+						drain()
 						return
 					case chunk, open = <-remaining:
 					}
@@ -375,7 +393,7 @@ func (m *Manager) wrapStreamResultWithCancel(ctx context.Context, auth *Auth, pr
 				if cancelAttempt != nil {
 					cancelAttempt()
 				}
-				discardStreamChunks(remaining)
+				drain()
 				return
 			}
 		}

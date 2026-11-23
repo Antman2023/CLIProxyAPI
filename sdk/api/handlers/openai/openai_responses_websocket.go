@@ -595,8 +595,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		close(wsDone)
 		cancelSocket(nil)
-		_, _ = writer.closeWithoutError()
-		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
+		// If the disconnect subscriber already claimed closure, let it deliver
+		// the terminal frame before the socket is closed.
+		if _, errClose := writer.closeWithoutError(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
 			log.Warnf("responses websocket: close connection error: %v", errClose)
 		}
 		disconnectWg.Wait()

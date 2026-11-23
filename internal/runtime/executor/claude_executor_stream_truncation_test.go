@@ -37,17 +37,10 @@ func TestClaudeExecutorStreamTruncationReportsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pluginName := "test-claude-passthrough-truncation"
-	plugin := &captureClaudeUsagePlugin{
-		records: make(chan usage.Record, 4),
-	}
-	usage.RegisterNamedPlugin(pluginName, plugin)
-	t.Cleanup(func() {
-		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
-	})
+	plugin := registerClaudeUsageCapture(t)
 
 	exec := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+	auth := &cliproxyauth.Auth{ID: plugin.authID, Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,
 	}}
@@ -113,17 +106,10 @@ func TestClaudeExecutorTranslatedStreamTruncationReportsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pluginName := "test-claude-translated-truncation"
-	plugin := &captureClaudeUsagePlugin{
-		records: make(chan usage.Record, 4),
-	}
-	usage.RegisterNamedPlugin(pluginName, plugin)
-	t.Cleanup(func() {
-		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
-	})
+	plugin := registerClaudeUsageCapture(t)
 
 	exec := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+	auth := &cliproxyauth.Auth{ID: plugin.authID, Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,
 	}}
@@ -425,17 +411,10 @@ func TestClaudeExecutorStreamErrorEventDoesNotCommitContinuityAndMarksFailed(t *
 	}))
 	defer server.Close()
 
-	pluginName := "test-claude-error-event-usage"
-	plugin := &captureClaudeUsagePlugin{
-		records: make(chan usage.Record, 4),
-	}
-	usage.RegisterNamedPlugin(pluginName, plugin)
-	t.Cleanup(func() {
-		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
-	})
+	plugin := registerClaudeUsageCapture(t)
 
 	exec := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+	auth := &cliproxyauth.Auth{ID: plugin.authID, Attributes: map[string]string{
 		"api_key":  "key-123",
 		"base_url": server.URL,
 	}}
@@ -965,15 +944,10 @@ func TestClaudeExecutorStreamCancel499RecordsLastPacketUsage(t *testing.T) {
 			}))
 			defer server.Close()
 
-			pluginName := "test-claude-cancel-499-" + mode.name
-			plugin := &captureClaudeUsagePlugin{records: make(chan usage.Record, 4)}
-			usage.RegisterNamedPlugin(pluginName, plugin)
-			t.Cleanup(func() {
-				usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
-			})
+			plugin := registerClaudeUsageCapture(t)
 
 			exec := NewClaudeExecutor(&config.Config{})
-			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+			auth := &cliproxyauth.Auth{ID: plugin.authID, Attributes: map[string]string{
 				"api_key":  "key-123",
 				"base_url": server.URL,
 			}}

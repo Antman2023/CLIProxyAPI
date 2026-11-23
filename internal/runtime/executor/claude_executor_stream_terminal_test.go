@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -21,11 +22,12 @@ import (
 )
 
 type captureClaudeUsagePlugin struct {
+	authID  string
 	records chan usage.Record
 }
 
 func (p *captureClaudeUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
-	if p == nil || record.Provider != "claude" {
+	if record.Provider != "claude" || record.AuthID != p.authID {
 		return
 	}
 	select {
@@ -37,6 +39,19 @@ func (p *captureClaudeUsagePlugin) HandleUsage(_ context.Context, record usage.R
 type noopClaudeUsagePlugin struct{}
 
 func (noopClaudeUsagePlugin) HandleUsage(context.Context, usage.Record) {}
+
+func registerClaudeUsageCapture(t *testing.T) *captureClaudeUsagePlugin {
+	t.Helper()
+	plugin := &captureClaudeUsagePlugin{
+		authID:  uuid.NewString(),
+		records: make(chan usage.Record, 4),
+	}
+	usage.RegisterNamedPlugin(t.Name(), plugin)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), noopClaudeUsagePlugin{})
+	})
+	return plugin
+}
 
 func TestClaudeExecutor_ExecuteStream_Translated_ClientDisconnectAfterTerminalEventIsNotFailed(t *testing.T) {
 	const streamData = "event: message_start\n" +
@@ -71,17 +86,11 @@ func TestClaudeExecutor_ExecuteStream_Translated_ClientDisconnectAfterTerminalEv
 		server.Close()
 	}()
 
-	pluginName := "test-claude-translated-disconnect"
-	plugin := &captureClaudeUsagePlugin{
-		records: make(chan usage.Record, 4),
-	}
-	usage.RegisterNamedPlugin(pluginName, plugin)
-	t.Cleanup(func() {
-		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
-	})
+	plugin := registerClaudeUsageCapture(t)
 
 	exec := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
+		ID: plugin.authID,
 		Attributes: map[string]string{
 			"api_key":  "key-123",
 			"base_url": server.URL,
@@ -167,17 +176,11 @@ func TestClaudeExecutor_ExecuteStream_Passthrough_ClientDisconnectAfterTerminalE
 		server.Close()
 	}()
 
-	pluginName := "test-claude-passthrough-disconnect"
-	plugin := &captureClaudeUsagePlugin{
-		records: make(chan usage.Record, 4),
-	}
-	usage.RegisterNamedPlugin(pluginName, plugin)
-	t.Cleanup(func() {
-		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
-	})
+	plugin := registerClaudeUsageCapture(t)
 
 	exec := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
+		ID: plugin.authID,
 		Attributes: map[string]string{
 			"api_key":  "key-123",
 			"base_url": server.URL,

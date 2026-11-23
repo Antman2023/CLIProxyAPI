@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -15,7 +16,8 @@ func TestIssue7741WrapStreamResultClosesOnCancellationDuringUpstreamStall(t *tes
 	remaining := make(chan cliproxyexecutor.StreamChunk)
 	t.Cleanup(func() { close(remaining) })
 
-	manager := NewManager(nil, nil, nil)
+	hook := newIssue7738ResultHook()
+	manager := NewManager(nil, nil, hook)
 	result := manager.wrapStreamResult(
 		ctx,
 		&Auth{ID: "issue7741-auth", Provider: "issue7741"},
@@ -56,5 +58,21 @@ func TestIssue7741WrapStreamResultClosesOnCancellationDuringUpstreamStall(t *tes
 		}
 	case <-time.After(time.Second):
 		t.Fatal("output did not close when context was canceled during upstream stall")
+	}
+
+	upstreamErr := &requestScopedStatusError{status: http.StatusBadGateway, message: "upstream rejected the request"}
+	select {
+	case remaining <- cliproxyexecutor.StreamChunk{Err: upstreamErr}:
+	case <-time.After(time.Second):
+		t.Fatal("upstream was not drained after cancellation")
+	}
+	select {
+	case <-hook.done:
+		results := hook.snapshot()
+		if len(results) != 1 || results[0].Success || results[0].Error == nil || results[0].Error.Code != ErrorCodeRequestScoped {
+			t.Fatalf("execution results = %+v, want a request-scoped failure", results)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not record the upstream failure after cancellation")
 	}
 }
