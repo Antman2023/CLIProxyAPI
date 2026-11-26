@@ -203,28 +203,14 @@ func TestShadowCopyPluginFallbackCacheIsolatesDistinctPluginDirs(t *testing.T) {
 }
 
 func TestShadowDirectoryDigestResolvesRelativePathsByWorkingDirectory(t *testing.T) {
-	origWD, errWD := os.Getwd()
-	if errWD != nil {
-		t.Fatalf("Getwd() error = %v", errWD)
-	}
 	workA := t.TempDir()
 	workB := t.TempDir()
-	// Restore the working directory before TempDir cleanup removes it on Windows.
-	t.Cleanup(func() {
-		if errChdir := os.Chdir(origWD); errChdir != nil {
-			t.Errorf("Chdir(origWD) cleanup error = %v", errChdir)
-		}
-	})
 	relDir := filepath.Join("plugins", runtime.GOOS, runtime.GOARCH)
 
-	if errChdir := os.Chdir(workA); errChdir != nil {
-		t.Fatalf("Chdir(workA) error = %v", errChdir)
-	}
+	t.Chdir(workA)
 	digestA := shadowDirectoryDigest(relDir)
 
-	if errChdir := os.Chdir(workB); errChdir != nil {
-		t.Fatalf("Chdir(workB) error = %v", errChdir)
-	}
+	t.Chdir(workB)
 	digestB := shadowDirectoryDigest(relDir)
 
 	if digestA == digestB {
@@ -831,4 +817,32 @@ func countShadowPluginFiles(t *testing.T, dir string) int {
 		}
 	}
 	return count
+}
+
+func TestAcquireShadowPluginLoadDoesNotReuseResidentImage(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "fixture.dll")
+	content := []byte("resident test plugin")
+	if errWrite := os.WriteFile(source, content, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	file := pluginFile{ID: "shadow-reload", Path: source}
+	first, releaseFirst, errFirst := acquireShadowPluginLoad(file)
+	if errFirst != nil {
+		t.Fatal(errFirst)
+	}
+	releaseFirst()
+	second, releaseSecond, errSecond := acquireShadowPluginLoad(file)
+	if errSecond != nil {
+		t.Fatal(errSecond)
+	}
+	defer releaseSecond()
+	if first == second {
+		t.Fatalf("native reload reused resident path %s", first)
+	}
+	for _, path := range []string{first, second} {
+		raw, errRead := os.ReadFile(path)
+		if errRead != nil || string(raw) != string(content) {
+			t.Fatalf("shadow content at %s = %q, error %v", path, raw, errRead)
+		}
+	}
 }

@@ -112,9 +112,9 @@ func TestKVBestEffortWriteSwallowsErrorAndRedactsLog(t *testing.T) {
 }
 
 func TestCurrentKVClientBridgesLocalBoltStoreAndPrioritizesHome(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
 	ClearCurrent()
 	_ = kvstore.ShutdownLocal()
-	dbPath := filepath.Join(t.TempDir(), "bridge.db")
 	t.Cleanup(func() {
 		ClearCurrent()
 		_ = kvstore.ShutdownLocal()
